@@ -5,7 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { fixture, multipart, server } = require("./helpers.cjs");
 
-async function run(t, values, base) {
+async function run(t, values, base, outputEOL = "") {
   const f = await fixture(t, "github-output");
   await fs.writeFile(f.file, "");
   const bundle = path.join(f.dir, "dist");
@@ -17,6 +17,7 @@ async function run(t, values, base) {
     GITHUB_OUTPUT: f.file,
     GITHUB_ACTIONS: "true",
     TEST_HTTP_BASE: base,
+    TEST_OUTPUT_EOL: outputEOL,
   });
   for (const [key, value] of Object.entries(values))
     env["INPUT_" + key.toUpperCase()] = value;
@@ -41,29 +42,40 @@ async function run(t, values, base) {
   return { code, stdout, stderr, output: await fs.readFile(f.file, "utf8") };
 }
 
-test("bundled action child process: native upload and GitHub output file", async (t) => {
-  const f = await fixture(t);
-  const s = await server(t);
-  const result = await run(
-    t,
-    {
-      token: "bundled-secret",
-      project_id: "123",
-      game_endpoint: "minecraft",
-      file_path: f.file,
-      game_versions: "42",
-    },
-    s.base,
-  );
-  assert.equal(result.code, 0, result.stderr + result.stdout);
-  assert.match(result.stdout, /::add-mask::bundled-secret/);
-  assert.match(result.output, /id<<[^\n]+\n987\n/);
-  assert.equal(s.uploads.length, 1);
-  const data = multipart({ headers: s.uploads[0].headers }, s.uploads[0].body);
-  assert.deepEqual(data.file, f.bytes);
-  assert.equal(data.filename, "primary mod.jar");
-  assert.equal(s.uploads[0].headers["x-api-token"], "bundled-secret");
-});
+for (const outputEOL of ["", "\r\n"])
+  test(`bundled action child process: native upload and GitHub output file (${outputEOL ? "CRLF" : "native"})`, async (t) => {
+    const f = await fixture(t);
+    const s = await server(t);
+    const result = await run(
+      t,
+      {
+        token: "bundled-secret",
+        project_id: "123",
+        game_endpoint: "minecraft",
+        file_path: f.file,
+        game_versions: "42",
+      },
+      s.base,
+      outputEOL,
+    );
+    assert.equal(result.code, 0, result.stderr + result.stdout);
+    assert.match(result.stdout, /::add-mask::bundled-secret/);
+    const outputLines = result.output.split(/\r?\n/);
+    assert.match(outputLines[0], /^id<<\S+$/);
+    assert.deepEqual(outputLines.slice(1), [
+      "987",
+      outputLines[0].slice("id<<".length),
+      "",
+    ]);
+    assert.equal(s.uploads.length, 1);
+    const data = multipart(
+      { headers: s.uploads[0].headers },
+      s.uploads[0].body,
+    );
+    assert.deepEqual(data.file, f.bytes);
+    assert.equal(data.filename, "primary mod.jar");
+    assert.equal(s.uploads[0].headers["x-api-token"], "bundled-secret");
+  });
 
 for (const failure of [
   "invalid input",

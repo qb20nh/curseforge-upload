@@ -34,7 +34,10 @@ function multipart(req, body) {
       bytes: Buffer.from(part.slice(start + 4, -2), "latin1"),
     };
   }
-  assert.deepEqual(Object.keys(fields).sort(), ["file", "metadata"]);
+  assert.deepEqual(
+    Object.keys(fields).sort((left, right) => left.localeCompare(right)),
+    ["file", "metadata"],
+  );
   return {
     file: fields.file.bytes,
     filename: /filename="([^"]+)"/.exec(fields.file.headers)[1],
@@ -58,11 +61,12 @@ async function server(t, options = {}) {
     if (req.method === "POST") uploads.push(record);
     if (options.respond)
       return options.respond(req, res, record, uploads.length);
-    const body = req.url.endsWith("/version-types")
-      ? options.types || []
-      : req.url.endsWith("/versions")
-        ? options.versions || []
-        : { id: 987 };
+    let body = { id: 987 };
+    if (req.url.endsWith("/version-types")) {
+      body = options.types || [];
+    } else if (req.url.endsWith("/versions")) {
+      body = options.versions || [];
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   });

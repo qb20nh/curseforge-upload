@@ -1,95 +1,118 @@
 # CurseForge Uploader
 
-An action for interacting with the [CurseForge file upload API](https://support.curseforge.com/en/support/solutions/articles/9000197321-curseforge-api)
+Upload one file to the [CurseForge upload API](https://support.curseforge.com/en/support/solutions/articles/9000197321-curseforge-api). This is the `qb20nh/curseforge-upload` fork of [itsmeow/curseforge-upload](https://github.com/itsmeow/curseforge-upload), preserving the MIT license and upstream attribution.
 
-## Usage/Arguments
+## v4 migration
 
-| Name           | Description                                                                                                                                                                                                                                                                    | Default Value | Required |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- | -------- |
-| token          | Token used to authenticate with CurseForge API. Use a repository secret for this.                                                                                                                                                                                              | N/A           | ✅       |
-| project_id     | Project id (numerical) to upload file to. You can get the numerical ID from the sidebar on a project page.                                                                                                                                                                     | N/A           | ✅       |
-| game_endpoint  | The game subdomain of curseforge.com where the upload request will be made. (`minecraft`, `bukkit`, `kerbal`, etc.)                                                                                                                                                            | N/A           | ✅       |
-| file_path      | The path to the file you want to upload.                                                                                                                                                                                                                                       | N/A           | ✅       |
-| game_versions  | The game version IDs to select on this file. Separate IDs with commas. See README for more info.                                                                                                                                                                               | []            | ❌       |
-| release_type   | The type of this release. Allowed values: `alpha`, `beta`, `release`.                                                                                                                                                                                                          | `release`     | ❌       |
-| display_name   | The display name for this file.                                                                                                                                                                                                                                                | Filename      | ❌       |
-| changelog      | The changelog text to put on the file.                                                                                                                                                                                                                                         |               | ❌       |
-| changelog_type | The type of the changelog. Allowed values: `text`, `html` (aka. WYSIWYG), `markdown`.                                                                                                                                                                                          | `markdown`    | ❌       |
-| relations      | List of projects this file is related to and their relation type. Separate with commas. Format: `projectslug:relationType` (slug is found in project URL) - Valid relationTypes are: `embeddedLibrary`, `incompatible`, `optionalDependency`, `requiredDependency`, and `tool` | []            | ❌       |
-| parent_file_id | The id of the parent file to put this file under. (File IDs are integers, found in the URL)                                                                                                                                                                                    | None          | ❌       |
+v4.0.0 runs on Node 24 and replaces deprecated `request` with native `fetch`, `URL`, `FormData`, and file-backed `fs.openAsBlob`. The `punycode`, `url.parse()` and `util.isArray()` dependency warnings from v3 are removed. Updating the fork does not change workflows still referencing `itsmeow/curseforge-upload@v3.1.2`: switch their action reference to a published commit of this fork.
 
-## Example Workflow
+All existing input names and the string `id` output are preserved. Valid existing workflows retain their defaults. Intentional changes:
 
-```yml
-name: "Build Release"
-on: push
+- Invalid local inputs stop before any HTTP request. Project/parent IDs must be positive safe integers; the upload must be a readable regular file.
+- Version entries are trimmed, empty entries ignored, and resolved IDs deduplicated in requested order. Missing or ambiguous names fail instead of silently dropping entries or choosing multiple matches.
+- `parent_file_id` and nonempty `game_versions` are mutually exclusive. Child attachments inherit their parent's version selection.
+- Redirects fail without forwarding the token. There are no automatic upload retries.
+- Only HTTP 2xx JSON responses containing a positive safe-integer file ID succeed. Failed actions emit no `id`.
+
+Supported platforms are GitHub-hosted Ubuntu, Windows and macOS runners. Self-hosted runners must support Node 24 JavaScript actions (runner v2.327.1 or newer); the pinned checkout v6 example additionally needs v2.329.0 or newer. Development requires Node 24. The action runs its committed bundle without `npm install` in the consuming workflow.
+
+## Inputs
+
+| Input | Description | Default | Required |
+| --- | --- | --- | --- |
+| `token` | CurseForge **upload API token**, passed in `X-Api-Token`; use a repository secret. This is not a CurseForge for Studios API key. | — | Yes |
+| `project_id` | Positive safe-integer project ID from the project sidebar. | — | Yes |
+| `game_endpoint` | Single game DNS label, e.g. `minecraft`, `bukkit`, `kerbal`; normalized to lowercase. | — | Yes |
+| `file_path` | Readable regular file; absolute or relative to the current working directory. Spaces are supported; the uploaded filename is its basename. | — | Yes |
+| `game_versions` | Comma-separated positive numeric IDs, names/slugs, or `type:version` selections. | Omitted | No |
+| `release_type` | `alpha`, `beta`, or `release`. | `release` | No |
+| `display_name` | Display name; when omitted CurseForge uses the filename. | Omitted | No |
+| `changelog` | Changelog text. | Empty | No |
+| `changelog_type` | `text`, `html`, or `markdown`. | `markdown` | No |
+| `relations` | Comma-separated `projectslug:relationType` pairs. Types: `embeddedLibrary`, `incompatible`, `optionalDependency`, `requiredDependency`, `tool`. | Omitted | No |
+| `parent_file_id` | Positive safe-integer parent file ID for an attachment. Omit `game_versions`. | Omitted | No |
+
+## Workflow example
+
+Pin the action to a full commit SHA from this fork. The example SHA below is the v4 implementation/bundle commit; it must be pushed to the fork before another repository can use it. No v4 tag or release is created by this change.
+
+```yaml
+name: Build release
+on: workflow_dispatch
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - { uses: actions/checkout@v2, with: { fetch-depth: 0 } }
-      - {
-          name: "Set up JDK 17",
-          uses: actions/setup-java@v2,
-          with: { distribution: "adopt", java-version: "17" },
-        }
-      - {
-          name: "Build with Gradle",
-          id: build,
-          run: "chmod +x gradlew && ./gradlew build publish",
-        }
-      - name: "Upload to CurseForge"
-        uses: itsmeow/curseforge-upload@v3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # Prepare Java and run your existing build here to produce mod.jar.
+      - name: Export build paths
+        id: build
+        shell: bash
+        run: echo "file=build/libs/mod.jar" >> "$GITHUB_OUTPUT"
+      - name: Upload primary mod
+        id: mod
+        uses: qb20nh/curseforge-upload@6f76082420e2658d337d12630332433427f699b8 # v4 implementation
         with:
-          file_path: "build/libs/examplemod-${{ steps.build.outputs.version }}.jar"
-          game_endpoint: "minecraft"
-          relations: "fabric-api:requiredDependency"
-          game_versions: "Minecraft 1.18:1.18.1,Java 17,Fabric"
-          project_id: "0"
-          token: "${{ secrets.CF_API_TOKEN }}"
+          file_path: ${{ steps.build.outputs.file }}
+          game_endpoint: minecraft
+          project_id: '12345' # Replace with your project ID
+          game_versions: 'Minecraft 1.20:1.20.1,Java 17,Fabric'
+          relations: fabric-api:requiredDependency
+          token: ${{ secrets.CF_API_TOKEN }}
+      - name: Upload sources attachment
+        uses: qb20nh/curseforge-upload@6f76082420e2658d337d12630332433427f699b8 # v4 implementation
+        with:
+          file_path: build/libs/mod-sources.jar
+          game_endpoint: minecraft
+          project_id: '12345'
+          parent_file_id: ${{ steps.mod.outputs.id }}
+          token: ${{ secrets.CF_API_TOKEN }}
+      - name: Upload evidence attachment
+        uses: qb20nh/curseforge-upload@6f76082420e2658d337d12630332433427f699b8 # v4 implementation
+        with:
+          file_path: build/evidence.zip
+          game_endpoint: minecraft
+          project_id: '12345'
+          parent_file_id: ${{ steps.mod.outputs.id }}
+          token: ${{ secrets.CF_API_TOKEN }}
 ```
 
-In this example, a file is uploaded with no custom title to project ID 0 in the Minecraft game category, with a dependency on Fabric API and game versions 1.18.1, Java 17, and Fabric loader.
+Each invocation uploads exactly one file. The primary mod is uploaded first; separate sources-JAR and evidence-ZIP steps refer to its returned ID. Create those files in your own build before uploading.
 
-The version in the filepath is not exported by default, so you can add this block to your buildscript to do so (this requires the Ubuntu runner):
+Obtain the existing upload token at <https://www.curseforge.com/account/api-tokens> and store it as a repository secret. The action masks it immediately. It is sent only in the authentication header, never in URLs or metadata.
 
-```groovy
-exec {
-    commandLine "echo", "##[set-output name=version;]${project.version}";
-}
+## Version selection
+
+Numeric selections such as `123,456` need no catalog request. Names and slugs are case-sensitive exact matches. A catalog is fetched once per action invocation; type metadata is fetched once only if a named type is specified.
+
+Minecraft and Bukkit can share version names, so `1.20.1` may be ambiguous. Use the precise catalog type name, slug, or ID: for example `Minecraft 1.20:1.20.1` or `<numeric-type-id>:1.20.1`. A requested selection must match exactly one type and version. Mixed selections retain order, with duplicate resolved IDs removed; commas and surrounding whitespace are accepted.
+
+Catalogs use `https://<game_endpoint>.curseforge.com/api/game/versions` and `/api/game/version-types`, authenticated with `X-Api-Token`. Do not put the token in a query string.
+
+## Deadlines and results
+
+Catalog requests have a 30-second deadline each. The upload has a 10-minute deadline including response parsing. Uploads use native multipart fields `file` and `metadata`; FormData generates the Content-Type boundary automatically. Upload file contents are backed by the file on disk, so avoid modifying it while the action runs.
+
+On success, `steps.<step-id>.outputs.id` is the accepted file ID as a string. API acceptance does not mean moderation is complete: CurseForge moderation may still be pending.
+
+Failures report the operation and HTTP status when received. Displayed response text is capped at 4 KiB and the token is redacted. After a timeout, connection loss, or invalid success response, the result is **uncertain**: the server may already have accepted the upload. Check the project's files before retrying. There is exactly one upload attempt per invocation.
+
+## Development and validation
+
+```sh
+node --version # Node 24
+npm ci
+npm run build
+npm test
+npm audit --omit=dev --audit-level=high
+git diff --exit-code -- dist/
+git ls-files --others -- dist/ # Must print nothing
 ```
 
-## Getting an API token
+The plain CommonJS implementation is in `upload.js`; `curseforge-upload.js` is the thin action entrypoint. `@actions/core` v3 exposes ESM exports and is bundled using dynamic import while keeping this project CommonJS. Commit the generated `dist/index.js` with code changes.
 
-Obtain them here: https://www.curseforge.com/account/api-tokens
+Tests use Node's built-in runner with `--throw-deprecation`, local HTTP servers, native multipart parsing, and a copied standalone bundle running as a child process with GitHub input/output files. They never contact CurseForge or require real credentials. CI runs the same checks on Ubuntu, Windows and macOS, with read-only repository permissions and no upload secrets. The POSIX unreadable-file test is explicitly skipped on Windows, where POSIX chmod does not remove read access.
 
-Add the token to your repository's secrets tab to use it, found under Settings.
-
-## Game Version IDs Explained
-
-You **MUST** namespace Minecraft version IDs as there are duplicates in the system for Bukkit.
-
-### API Method
-
-You can use numerical IDs by making a request to and picking your versions from this API:
-
-https://`endpoint`.curseforge.com/api/game/versions?token=`your_token`
-
-Using this method is more efficient request wise, as otherwise the Action will have to search this API before requesting the upload.
-
-### Inspect Element Method
-
-Another method is using Inspect Element on the game version check boxes, the `value` field contains the version ID.
-
-### Convenience Method
-
-However, this is not always convenient. You can also use names and slugs from that API, for example: "1.12.2" and "Java 8" will be automatically parsed into the proper id.
-
-You may encounter issues with names/slugs that have multiple entries with different game version types. The minecraft endpoint has "1.12" 5 separate times with different game version types for Bukkit, Minecraft 1.12, etc.
-To fix this, you can prefix a game version with a Type's ID, slug, or name. For example "Minecraft 1.12:1.12" would get you ONLY the Minecraft 1.12 version and not the 4 others.
-
-Another example is "java:Java 8". This filters to anything named "Java 8" with the type matching the slug/name "java".
-
-You can get a list of game version type IDs from this API:
-
-https://`endpoint`.curseforge.com/api/game/version-types?token=`your_token`
+Local tests verify request construction and failure handling; they do not establish acceptance by the live CurseForge service. A real upload remains a separate service-acceptance check requiring approval. Tags, releases and changes to consuming repositories are also outside this implementation.

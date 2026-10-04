@@ -1,15 +1,15 @@
 {
   "name": "curseforge-upload",
-  "version": "3.1.2",
+  "version": "4.0.0",
   "description": "Upload to CurseForge",
   "main": "./dist/index.js",
   "scripts": {
     "build": "ncc build curseforge-upload.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --throw-deprecation --test test/*.test.cjs"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/itsmeow/curseforge-upload.git"
+    "url": "git+https://github.com/qb20nh/curseforge-upload.git"
   },
   "keywords": [
     "actions"
@@ -17,15 +17,16 @@
   "author": "itsmeow",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/itsmeow/curseforge-upload/issues"
+    "url": "https://github.com/qb20nh/curseforge-upload/issues"
   },
-  "homepage": "https://github.com/itsmeow/curseforge-upload#readme",
+  "homepage": "https://github.com/qb20nh/curseforge-upload#readme",
   "dependencies": {
-    "@actions/core": "^1.10.1",
-    "json-schema": "^0.4.0",
-    "request": "^2.88.2"
+    "@actions/core": "3.0.1"
   },
   "devDependencies": {
-    "@vercel/ncc": "^0.38.1"
+    "@vercel/ncc": "0.45.0"
+  },
+  "engines": {
+    "node": ">=24 <25"
   }
 }

@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { EnvHttpProxyAgent } = require("undici");
 
 const INPUTS = [
   "project_id",
@@ -285,46 +286,64 @@ async function resolveVersions(
 async function upload(
   inputs,
   {
-    fetch = globalThis.fetch,
+    fetch: fetchOverride,
     catalogTimeoutMs = 30_000,
     uploadTimeoutMs = 600_000,
   } = {},
 ) {
   const config = await validate(inputs);
-  const headers = { "X-Api-Token": inputs.token };
-  const versions = await resolveVersions(
-    config.entries,
-    config.base,
-    headers,
-    fetch,
-    inputs.token,
-    catalogTimeoutMs,
-  );
-  if (versions.length) config.metadata.gameVersions = versions;
-  const form = new FormData();
-  form.append("file", config.blob, path.basename(config.file));
-  form.append("metadata", JSON.stringify(config.metadata));
-  // One POST only: retrying a request with a lost response can create duplicate files.
-  const result = await requestJSON(
-    fetch,
-    new URL(`/api/projects/${config.projectID}/upload-file`, config.base),
-    { method: "POST", headers, body: form },
-    "Upload",
-    inputs.token,
-    uploadTimeoutMs,
-    true,
-  );
+  let dispatcher;
+  const fetch =
+    fetchOverride ||
+    ((url, init) => {
+      if (!dispatcher) {
+        try {
+          dispatcher = new EnvHttpProxyAgent();
+        } catch {
+          // Proxy URLs may include credentials; do not echo them in errors.
+          throw new Error("Invalid HTTP_PROXY/HTTPS_PROXY configuration.");
+        }
+      }
+      return globalThis.fetch(url, { ...init, dispatcher });
+    });
   try {
-    if (
-      typeof result.data?.id !== "number" &&
-      typeof result.data?.id !== "string"
-    )
-      throw new Error("missing file ID");
-    return String(positiveID(result.data.id, "Response file ID"));
-  } catch {
-    throw new Error(
-      `Upload failed (HTTP ${result.status}): response must contain a positive safe-integer file ID.${UNCERTAIN}`,
+    const headers = { "X-Api-Token": inputs.token };
+    const versions = await resolveVersions(
+      config.entries,
+      config.base,
+      headers,
+      fetch,
+      inputs.token,
+      catalogTimeoutMs,
     );
+    if (versions.length) config.metadata.gameVersions = versions;
+    const form = new FormData();
+    form.append("file", config.blob, path.basename(config.file));
+    form.append("metadata", JSON.stringify(config.metadata));
+    // One POST only: retrying a request with a lost response can create duplicate files.
+    const result = await requestJSON(
+      fetch,
+      new URL(`/api/projects/${config.projectID}/upload-file`, config.base),
+      { method: "POST", headers, body: form },
+      "Upload",
+      inputs.token,
+      uploadTimeoutMs,
+      true,
+    );
+    try {
+      if (
+        typeof result.data?.id !== "number" &&
+        typeof result.data?.id !== "string"
+      )
+        throw new Error("missing file ID");
+      return String(positiveID(result.data.id, "Response file ID"));
+    } catch {
+      throw new Error(
+        `Upload failed (HTTP ${result.status}): response must contain a positive safe-integer file ID.${UNCERTAIN}`,
+      );
+    }
+  } finally {
+    await dispatcher?.close();
   }
 }
 

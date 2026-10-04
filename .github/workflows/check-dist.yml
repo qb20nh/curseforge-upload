@@ -29,6 +29,10 @@ jobs:
         run: npm run build
       - name: Test source and bundled action
         run: npm test
+      - name: Test in a root-based Linux environment
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -- "$(command -v node)" --throw-deprecation --test test/*.test.cjs
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
       - name: Check committed bundle and unexpected build files

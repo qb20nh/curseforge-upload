@@ -210,7 +210,11 @@ test("parent and versions conflict is rejected before requests", async (t) => {
 for (const kind of ["missing", "directory", "unreadable"])
   test(
     `reject ${kind} upload file`,
-    { skip: kind === "unreadable" && process.platform === "win32" },
+    {
+      skip:
+        kind === "unreadable" &&
+        (process.platform === "win32" || process.geteuid?.() === 0),
+    },
     async (t) => {
       const f = await fixture(t);
       let calls = 0;

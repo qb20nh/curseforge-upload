@@ -91,6 +91,8 @@ Minecraft and Bukkit can share version names, so `1.20.1` may be ambiguous. Use 
 
 Catalogs use `https://<game_endpoint>.curseforge.com/api/game/versions` and `/api/game/version-types`, authenticated with `X-Api-Token`. Do not put the token in a query string.
 
+Self-hosted runners can configure `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (including lowercase variants). Native fetch uses an explicit Undici environment proxy dispatcher for catalog and upload requests, preserving proxy routing throughout Node 24. TLS certificate verification stays enabled.
+
 ## Deadlines and results
 
 Catalog requests have a 30-second deadline each. The upload has a 10-minute deadline including response parsing. Uploads use native multipart fields `file` and `metadata`; FormData generates the Content-Type boundary automatically. Upload file contents are backed by the file on disk, so avoid modifying it while the action runs.
@@ -113,6 +115,6 @@ git ls-files --others -- dist/ # Must print nothing
 
 The plain CommonJS implementation is in `upload.js`; `curseforge-upload.js` is the thin action entrypoint. `@actions/core` v3 exposes ESM exports and is bundled using dynamic import while keeping this project CommonJS. Commit the generated `dist/index.js` with code changes.
 
-Tests use Node's built-in runner with `--throw-deprecation`, local HTTP servers, native multipart parsing, and a copied standalone bundle running as a child process with GitHub input/output files. They never contact CurseForge or require real credentials. CI runs the same checks on Ubuntu, Windows and macOS, with read-only repository permissions and no upload secrets. The POSIX unreadable-file test is explicitly skipped on Windows, where POSIX chmod does not remove read access.
+Tests use Node's built-in runner with `--throw-deprecation`, local HTTP servers, native multipart parsing, and a copied standalone bundle running as a child process with GitHub input/output files. They never contact CurseForge or require real credentials. CI runs the same checks on Ubuntu, Windows and macOS, with read-only repository permissions and no upload secrets. The unreadable-file test is skipped on Windows and for effective UID 0 on POSIX, where chmod cannot establish read denial. CI also runs the full suite as root on Ubuntu.
 
 Local tests verify request construction and failure handling; they do not establish acceptance by the live CurseForge service. A real upload remains a separate service-acceptance check requiring approval. Tags, releases and changes to consuming repositories are also outside this implementation.

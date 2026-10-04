@@ -1,0 +1,1 @@
+The certificate and private key are public localhost test fixtures, generated solely for HTTPS proxy tests. Tests explicitly trust this certificate through NODE_EXTRA_CA_CERTS and keep TLS verification enabled. The certificate covers localhost and 127.0.0.1 and expires in October 2036.

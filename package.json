@@ -21,7 +21,8 @@
   },
   "homepage": "https://github.com/qb20nh/curseforge-upload#readme",
   "dependencies": {
-    "@actions/core": "3.0.1"
+    "@actions/core": "3.0.1",
+    "undici": "7.30.0"
   },
   "devDependencies": {
     "@vercel/ncc": "0.45.0"

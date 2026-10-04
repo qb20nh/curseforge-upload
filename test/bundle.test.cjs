@@ -12,7 +12,11 @@ async function run(t, values, base, outputEOL = "") {
   await fs.cp(path.join(__dirname, "../dist"), bundle, { recursive: true });
   const env = { ...process.env };
   for (const key of Object.keys(env))
-    if (key.startsWith("INPUT_")) delete env[key];
+    if (
+      key.startsWith("INPUT_") ||
+      /^(https?_proxy|no_proxy|all_proxy)$/i.test(key)
+    )
+      delete env[key];
   Object.assign(env, {
     GITHUB_OUTPUT: f.file,
     GITHUB_ACTIONS: "true",

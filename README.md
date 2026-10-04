@@ -53,7 +53,7 @@ jobs:
         run: echo "file=build/libs/mod.jar" >> "$GITHUB_OUTPUT"
       - name: Upload primary mod
         id: mod
-        uses: qb20nh/curseforge-upload@9f27ff3e79e380b19f2eda1fa7139ec2c932d8ed # v4 implementation
+        uses: qb20nh/curseforge-upload@ca94ed0392ea2a4d975f0eef5e02f7805aa30469 # v4 implementation
         with:
           file_path: ${{ steps.build.outputs.file }}
           game_endpoint: minecraft
@@ -62,7 +62,7 @@ jobs:
           relations: fabric-api:requiredDependency
           token: ${{ secrets.CF_API_TOKEN }}
       - name: Upload sources attachment
-        uses: qb20nh/curseforge-upload@9f27ff3e79e380b19f2eda1fa7139ec2c932d8ed # v4 implementation
+        uses: qb20nh/curseforge-upload@ca94ed0392ea2a4d975f0eef5e02f7805aa30469 # v4 implementation
         with:
           file_path: build/libs/mod-sources.jar
           game_endpoint: minecraft
@@ -70,7 +70,7 @@ jobs:
           parent_file_id: ${{ steps.mod.outputs.id }}
           token: ${{ secrets.CF_API_TOKEN }}
       - name: Upload evidence attachment
-        uses: qb20nh/curseforge-upload@9f27ff3e79e380b19f2eda1fa7139ec2c932d8ed # v4 implementation
+        uses: qb20nh/curseforge-upload@ca94ed0392ea2a4d975f0eef5e02f7805aa30469 # v4 implementation
         with:
           file_path: build/evidence.zip
           game_endpoint: minecraft

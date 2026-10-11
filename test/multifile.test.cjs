@@ -72,6 +72,17 @@ function parseUpload(record) {
   return multipart({ headers: record.headers }, record.body);
 }
 
+function isolateProxyEnvironment(t, values) {
+  const isProxy = (name) => /^(https?_proxy|no_proxy|all_proxy)$/i.test(name);
+  const original = Object.fromEntries(Object.entries(process.env).filter(([name]) => isProxy(name)));
+  for (const name of Object.keys(process.env)) if (isProxy(name)) delete process.env[name];
+  Object.assign(process.env, values);
+  t.after(() => {
+    for (const name of Object.keys(process.env)) if (isProxy(name)) delete process.env[name];
+    Object.assign(process.env, original);
+  });
+}
+
 test("one held main and sequential attachments preserve paths, bytes and metadata", async (t) => {
   const f = await family(t);
   const s = await server(t, { respond: accept });
@@ -431,10 +442,16 @@ test("multi-file attachment retries preserve bytes and metadata and record one a
   });
   let elapsed = 0;
   const delays = [];
+  let receiptPath;
+  const beforeRequests = [];
   const core = actionCore(f.inputs);
   await runAction(core, {
-    fetch: s.fetch,
+    fetch: async (...args) => {
+      beforeRequests.push(JSON.parse(await fs.readFile(receiptPath, "utf8")));
+      return s.fetch(...args);
+    },
     receiptDirectory: f.dir,
+    onReceipt: (file) => { receiptPath = file; },
     now: () => elapsed,
     wait: async (milliseconds) => { delays.push(milliseconds); elapsed += milliseconds; },
   });
@@ -442,6 +459,13 @@ test("multi-file attachment retries preserve bytes and metadata and record one a
   assert.deepEqual(outputs(core, "id"), [["output", "id", "101"]]);
   assert.equal(s.uploads.length, 5);
   assert.deepEqual(delays, [2000, 4000]);
+  for (const [index, snapshot] of beforeRequests.slice(1, 4).entries()) {
+    assert.equal(snapshot.files[0].state, "accepted");
+    assert.equal(snapshot.files[0].id, 101);
+    assert.equal(snapshot.files[1].state, "uploading");
+    assert.equal(snapshot.files[1].attempts, index + 1);
+    assert.equal(snapshot.files[1].id, null);
+  }
   const repeated = s.uploads.slice(1, 4).map(parseUpload);
   for (const data of repeated) {
     assert.equal(data.filename, path.basename(f.files[1].file));
@@ -457,6 +481,105 @@ test("multi-file attachment retries preserve bytes and metadata and record one a
   assert.match(log, /parent unavailable or invalid/i);
   assert.match(log, /retry attempts: 2/i);
   assert.equal(log.includes(token), false);
+});
+
+test("interrupted backoff after a definite parent rejection resumes from a durable pending snapshot", async (t) => {
+  const f = await family(t);
+  const s = await server(t, {
+    respond: (_req, res, _record, count) => {
+      res.writeHead(count === 2 ? 400 : 201);
+      res.end(JSON.stringify(count === 2 ? { errorCode: 1012 } : { id: 100 + count }));
+    },
+  });
+  let receiptPath;
+  const interrupted = path.join(f.dir, "interrupted-receipt.json");
+  const first = actionCore(f.inputs);
+  await runAction(first, {
+    fetch: s.fetch,
+    receiptDirectory: f.dir,
+    onReceipt: (file) => { receiptPath = file; },
+    wait: async () => {
+      // Preserve exactly what a terminated process would leave during backoff.
+      await fs.copyFile(receiptPath, interrupted);
+      throw new Error("simulated interruption during retry backoff");
+    },
+  });
+  assert.equal(s.uploads.length, 2);
+  assert.deepEqual(outputs(first, "id"), []);
+  const snapshot = JSON.parse(await fs.readFile(interrupted, "utf8"));
+  assert.equal(snapshot.parentID, 101);
+  assert.deepEqual(snapshot.files.map((file) => file.state), ["accepted", "pending", "pending"]);
+  assert.deepEqual(snapshot.files.map((file) => file.attempts), [1, 1, 0]);
+  const resumed = actionCore({ ...f.inputs, receipt: interrupted });
+  await runAction(resumed, { fetch: s.fetch, receiptDirectory: f.dir });
+  assert.equal(resumed.events.filter((event) => event[0] === "failed").length, 0);
+  assert.deepEqual(outputs(resumed, "id"), [["output", "id", "101"]]);
+  assert.equal(s.uploads.length, 4);
+  assert.deepEqual(s.uploads.slice(2).map((record) => parseUpload(record).filename), f.files.slice(1).map((file) => path.basename(file.file)));
+  const saved = await actionReceipt(resumed);
+  assert.deepEqual(saved.receipt.files.map((file) => file.id), [101, 103, 104]);
+});
+
+for (const variable of ["HTTP_PROXY", "HTTPS_PROXY"])
+  for (const versions of ["", "42"])
+    test(`invalid ${variable} with ${versions ? "numeric" : "omitted"} versions leaves an unattempted receipt and resumes after correction`, async (t) => {
+      const f = await family(t);
+      const s = await server(t, { respond: accept });
+      isolateProxyEnvironment(t, { [variable]: `http://user:${token}@[invalid` });
+      const realFetch = globalThis.fetch;
+      const fetchSpy = t.mock.method(globalThis, "fetch", (url, init) => {
+        assert.ok(init.dispatcher, "default transport must construct its real proxy dispatcher");
+        const { dispatcher, ...request } = init;
+        return realFetch(s.base + new URL(url).pathname, request);
+      });
+      const inputs = { ...f.inputs, game_versions: versions };
+      const first = actionCore(inputs);
+      await runAction(first, { receiptDirectory: f.dir });
+      assert.equal(fetchSpy.mock.callCount(), 0);
+      assert.equal(s.requests.length, 0);
+      assert.deepEqual(outputs(first, "id"), []);
+      const failures = first.events.filter((event) => event[0] === "failed");
+      assert.equal(failures.length, 1);
+      assert.match(failures[0][1], /Invalid HTTP_PROXY\/HTTPS_PROXY configuration/);
+      assert.equal(failures[0][1].includes(token), false);
+      const saved = await actionReceipt(first);
+      assert.deepEqual(saved.receipt.files.map((file) => file.state), ["pending", "pending", "pending"]);
+      assert.deepEqual(saved.receipt.files.map((file) => file.attempts), [0, 0, 0]);
+      assert.deepEqual(saved.receipt.files.map((file) => file.id), [null, null, null]);
+      delete process.env[variable];
+      const resumed = actionCore({ ...inputs, receipt: saved.file });
+      await runAction(resumed, { receiptDirectory: f.dir });
+      assert.equal(resumed.events.filter((event) => event[0] === "failed").length, 0);
+      assert.deepEqual(outputs(resumed, "id"), [["output", "id", "101"]]);
+      assert.equal(fetchSpy.mock.callCount(), 3);
+      const after = await actionReceipt(resumed);
+      assert.deepEqual(after.receipt.files.map((file) => file.state), ["accepted", "accepted", "accepted"]);
+      assert.deepEqual(after.receipt.files.map((file) => file.id), [101, 102, 103]);
+      assert.deepEqual(after.receipt.files.map((file) => file.attempts), [1, 1, 1]);
+    });
+
+test("an explicit fetch override ignores invalid proxy configuration", async (t) => {
+  const f = await family(t);
+  const s = await server(t, { respond: accept });
+  isolateProxyEnvironment(t, { HTTP_PROXY: "http://[invalid", HTTPS_PROXY: "http://[invalid" });
+  assert.equal(await upload(f.inputs, { fetch: s.fetch, receiptDirectory: f.dir }), "101");
+  assert.equal(s.uploads.length, 3);
+});
+
+test("fully accepted receipt needs no proxy initialization or fetch", async (t) => {
+  const f = await family(t);
+  const s = await server(t, { respond: accept });
+  const first = actionCore(f.inputs);
+  await runAction(first, { fetch: s.fetch, receiptDirectory: f.dir });
+  const saved = await actionReceipt(first);
+  isolateProxyEnvironment(t, { HTTP_PROXY: "http://[invalid", HTTPS_PROXY: "http://[invalid" });
+  const fetchSpy = t.mock.method(globalThis, "fetch", () => { throw new Error("must not reach network"); });
+  const resumed = actionCore({ ...f.inputs, receipt: saved.file });
+  await runAction(resumed, { receiptDirectory: f.dir });
+  assert.equal(resumed.events.filter((event) => event[0] === "failed").length, 0);
+  assert.deepEqual(outputs(resumed, "id"), [["output", "id", "101"]]);
+  assert.equal(fetchSpy.mock.callCount(), 0);
+  assert.equal(s.uploads.length, 3);
 });
 
 test("persistent parent rejection saves pending files and resumes without repeating the held main", async (t) => {

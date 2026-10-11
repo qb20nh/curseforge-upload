@@ -167,6 +167,7 @@ async function uploadFile({
   wait = (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   onAttempt = async () => {},
+  onRetryableRejection = async () => {},
 }) {
   const deadline = now() + timeoutMs;
   const metadataJSON = JSON.stringify(metadata);
@@ -216,6 +217,15 @@ async function uploadFile({
         attempts > RETRY_DELAYS.length
       ) {
         throw error;
+      }
+      try {
+        // Persist the definitive rejection before an interruptible retry delay.
+        await onRetryableRejection(attempts);
+      } catch (saveError) {
+        throw failure(
+          `Unable to record rejected upload attempt: ${redact(saveError.message, token)}.`,
+          { status: error.status, errorCode: error.errorCode, attempts },
+        );
       }
       const remainingForDelay = deadline - now();
       if (remainingForDelay <= 0) throw expired();

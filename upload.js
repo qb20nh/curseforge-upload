@@ -284,7 +284,7 @@ async function upload(
 ) {
   const config = await validate(inputs);
   let dispatcher, receipt;
-  const fetch = fetchOverride || ((url, init) => {
+  const ensureDispatcher = () => {
     if (!dispatcher) {
       try {
         dispatcher = new EnvHttpProxyAgent();
@@ -293,8 +293,10 @@ async function upload(
         throw new Error("Invalid HTTP_PROXY/HTTPS_PROXY configuration.");
       }
     }
-    return globalThis.fetch(url, { ...init, dispatcher });
-  });
+    return dispatcher;
+  };
+  const fetch = fetchOverride || ((url, init) =>
+    globalThis.fetch(url, { ...init, dispatcher: ensureDispatcher() }));
   try {
     const headers = { "X-Api-Token": inputs.token };
     let candidate, versions;
@@ -341,6 +343,8 @@ async function upload(
       if (config.parentID || index > 0) file.metadata.parentFileID = parentID;
       let id;
       try {
+        // Local proxy validation cannot leave an upload marked in flight.
+        if (!fetchOverride) ensureDispatcher();
         id = await uploadFile({
           fetch, url, headers,
           blob: file.blob,
@@ -360,6 +364,12 @@ async function upload(
               await onProgress?.(
                 `Retrying attachment ${path.basename(file.path)} (attempt ${attempt}/7): parent unavailable or invalid (error 1012).`,
               );
+          },
+          onRetryableRejection: async () => {
+            if (record) {
+              record.state = "pending";
+              await receipt.save();
+            }
           },
         });
       } catch (error) {

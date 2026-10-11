@@ -62,6 +62,103 @@ test("attachment retry uses fresh multipart with identical metadata and file byt
   assert.equal(new Set(s.uploads.map((request) => request.headers["content-type"])).size, 3);
 });
 
+test("retryable rejection is saved before backoff and the next upload attempt", async (t) => {
+  const state = await fixture(t, "attempt-state.json");
+  const events = [];
+  const s = await server(t, {
+    respond: (_req, res, _record, count) => {
+      events.push(`request:${count}`);
+      res.writeHead(count === 1 ? 400 : 201);
+      res.end(JSON.stringify(count === 1 ? { errorCode: 1012 } : { id: 987 }));
+    },
+  });
+  const clock = virtualTime();
+  const config = await options(t, s, {
+    now: clock.now,
+    onAttempt: async (attempt) => {
+      await fs.promises.writeFile(state.file, JSON.stringify({ state: "uploading", attempt }));
+      events.push(`attempt:${attempt}`);
+    },
+    onRetryableRejection: async (attempt) => {
+      await new Promise((resolve) => setImmediate(resolve));
+      await fs.promises.writeFile(state.file, JSON.stringify({ state: "pending", attempt }));
+      events.push(`rejection-saved:${attempt}`);
+    },
+    wait: async (milliseconds) => {
+      assert.deepEqual(JSON.parse(await fs.promises.readFile(state.file, "utf8")), {
+        state: "pending", attempt: 1,
+      });
+      events.push(`wait:${milliseconds}`);
+      await clock.wait(milliseconds);
+    },
+  });
+  assert.equal(await uploadFile(config), 987);
+  assert.deepEqual(events, [
+    "attempt:1", "request:1", "rejection-saved:1", "wait:2000",
+    "attempt:2", "request:2",
+  ]);
+});
+
+test("retryable rejection save failure stops before waiting or another request", async (t) => {
+  const s = await server(t, {
+    respond: (_req, res) => {
+      res.writeHead(400);
+      res.end('{"errorCode":1012}');
+    },
+  });
+  const clock = virtualTime();
+  await assert.rejects(uploadFile(await options(t, s, {
+    ...clock,
+    onRetryableRejection: async () => {
+      throw new Error(`receipt write failed ${token}`);
+    },
+  })), (error) => {
+    assert.equal(error.status, 400);
+    assert.equal(error.errorCode, 1012);
+    assert.equal(error.uncertain, false);
+    assert.equal(error.attempts, 1);
+    assert.equal(error.message.includes(token), false);
+    assert.match(error.message, /record rejected upload attempt.*receipt write failed \[REDACTED\]/);
+    return true;
+  });
+  assert.equal(s.uploads.length, 1);
+  assert.deepEqual(clock.delays, []);
+});
+
+for (const [timeoutMs, savingMs, expectedDelays] of [
+  [1000, 1000, []],
+  [2500, 1000, [1500]],
+]) {
+  test(`rejection persistence consumes the original ${timeoutMs}ms per-file deadline`, async (t) => {
+    const s = await server(t, {
+      respond: (_req, res) => {
+        res.writeHead(400);
+        res.end('{"errorCode":1012}');
+      },
+    });
+    const clock = virtualTime();
+    let rejections = 0;
+    await assert.rejects(uploadFile(await options(t, s, {
+      ...clock,
+      timeoutMs,
+      onRetryableRejection: async () => {
+        rejections++;
+        clock.advance(savingMs);
+      },
+    })), (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.errorCode, 1012);
+      assert.equal(error.uncertain, false);
+      assert.equal(error.attempts, 1);
+      assert.match(error.message, /deadline/i);
+      return true;
+    });
+    assert.equal(rejections, 1);
+    assert.equal(s.uploads.length, 1);
+    assert.deepEqual(clock.delays, expectedDelays);
+  });
+}
+
 test("persistent attachment 1012 has seven requests and fixed bounded backoff", async (t) => {
   const s = await server(t, {
     respond: (_req, res) => {
@@ -89,7 +186,12 @@ test("main-file 1012 is never retried", async (t) => {
     },
   });
   const clock = virtualTime();
-  const config = await options(t, s, { ...clock, metadata: { releaseType: "release" } });
+  let rejections = 0;
+  const config = await options(t, s, {
+    ...clock,
+    metadata: { releaseType: "release" },
+    onRetryableRejection: () => { rejections++; },
+  });
   await assert.rejects(uploadFile(config), (error) => {
     assert.equal(error.attempts, 1);
     assert.equal(error.errorCode, 1012);
@@ -97,6 +199,7 @@ test("main-file 1012 is never retried", async (t) => {
     return true;
   });
   assert.equal(s.uploads.length, 1);
+  assert.equal(rejections, 0);
   assert.deepEqual(clock.delays, []);
 });
 
@@ -124,7 +227,11 @@ for (const [status, body, uncertain] of [
       },
     });
     const clock = virtualTime();
-    await assert.rejects(uploadFile(await options(t, s, clock)), (error) => {
+    let rejections = 0;
+    await assert.rejects(uploadFile(await options(t, s, {
+      ...clock,
+      onRetryableRejection: () => { rejections++; },
+    })), (error) => {
       assert.equal(error.status, status);
       assert.equal(error.uncertain, uncertain);
       assert.equal(error.attempts, 1);
@@ -132,6 +239,7 @@ for (const [status, body, uncertain] of [
       return true;
     });
     assert.equal(s.requests.length, 1);
+    assert.equal(rejections, 0);
     assert.deepEqual(clock.delays, []);
   });
 }

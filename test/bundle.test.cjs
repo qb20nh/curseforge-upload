@@ -248,6 +248,57 @@ test("bundled partial failure exposes receipt without id and resume uploads only
   assert.match(resumed.stdout, /Complete upload/);
 });
 
+test("bundled stored attachment with HTTP 500 remains uncertain and resume sends no upload", async (t) => {
+  const main = await fixture(t, "main.jar", Buffer.from("main bytes"));
+  const child = await fixture(t, "sources with spaces.jar", Buffer.from("source bytes"));
+  const storage = await fixture(t, "server-storage");
+  const storedPaths = [];
+  const s = await server(t, {
+    respond: async (_req, res, record, count) => {
+      const data = multipart({ headers: record.headers }, record.body);
+      const storedPath = path.join(storage.dir, `accepted-${count}.bin`);
+      // Model a server that creates the file before a later operation fails.
+      await fs.writeFile(storedPath, data.file);
+      storedPaths.push(storedPath);
+      res.writeHead(count === 2 ? 500 : 201);
+      res.end(count === 2
+        ? JSON.stringify({ errorCode: 1012, errorMessage: "Post-save failure bundled-secret" })
+        : JSON.stringify({ id: 100 + count }));
+    },
+  });
+  const values = {
+    token: "bundled-secret",
+    project_id: "123",
+    game_endpoint: "minecraft",
+    file_path: main.file,
+    additional_files: child.file,
+    game_versions: "42",
+  };
+  const failed = await run(t, values, s.base);
+  assert.equal(failed.code, 1, failed.stderr);
+  assert.deepEqual(Object.keys(failed.outputs), ["receipt"]);
+  assert.equal(s.uploads.length, 2);
+  assert.deepEqual(await fs.readFile(storedPaths[1]), child.bytes);
+  const receipt = JSON.parse(await fs.readFile(failed.outputs.receipt, "utf8"));
+
+  const resumed = await run(t, { ...values, receipt: failed.outputs.receipt }, s.base);
+  assert.equal(s.uploads.length, 2, "resume must not duplicate an attachment stored before HTTP 500");
+  assert.equal(storedPaths.length, 2);
+  assert.equal(resumed.code, 1, resumed.stderr + resumed.stdout);
+  assert.deepEqual(resumed.outputs, { receipt: failed.outputs.receipt });
+  assert.equal(receipt.parentID, 101);
+  assert.deepEqual(receipt.files.map((file) => file.state), ["accepted", "uncertain"]);
+  assert.deepEqual(receipt.files.map((file) => file.id), [101, null]);
+  assert.deepEqual(receipt.files.map((file) => file.attempts), [1, 1]);
+  assert.equal(receipt.files[0].metadata.isMarkedForManualRelease, true);
+  assert.match(failed.stdout, /uncertain.*check.*before retry/i);
+  assert.match(resumed.stdout, /uncertain upload.*manually reconcile/i);
+  assert.doesNotMatch(resumed.stdout, /Complete upload/);
+  const errors = failed.stdout.split("\n").filter((line) => line.startsWith("::error::"));
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].includes("bundled-secret"), false);
+});
+
 for (const failure of [
   "invalid input",
   "invalid response",

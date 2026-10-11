@@ -67052,7 +67052,10 @@ async function requestJSON(
             : null,
         uncertain:
           uploading &&
-          (!body.complete || (response.status >= 300 && response.status < 400)),
+          // A server error can follow a completed write without returning its ID.
+          (!body.complete ||
+            (response.status >= 300 && response.status < 400) ||
+            (response.status >= 500 && response.status < 600)),
       });
     }
     if (!body.complete || data === undefined) {

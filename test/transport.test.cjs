@@ -210,7 +210,10 @@ for (const [status, body, uncertain] of [
   [400, '{"errorCode":1012', false],
   [401, '{"errorCode":1012}', false],
   [429, '{"errorCode":1012}', false],
-  [500, '{"errorCode":1012}', false],
+  [500, '{"errorCode":1012}', true],
+  [502, 'Bad gateway', true],
+  [503, '', true],
+  [599, '{"errorCode":1012}', true],
   [307, '{"errorCode":1012}', true],
   [200, '{"errorCode":1012}', true],
   [200, '{"id":0}', true],
@@ -417,6 +420,24 @@ test("catalog requests retain JSON/status API and do not report upload uncertain
     return true;
   });
   assert.equal(s.requests.length, 2);
+  assert.equal(s.uploads.length, 0);
+});
+
+test("catalog server errors retain their status without upload uncertainty", async (t) => {
+  const s = await server(t, {
+    respond: (_req, res) => {
+      res.writeHead(500);
+      res.end(JSON.stringify({ errorCode: 1012, errorMessage: token }));
+    },
+  });
+  await assert.rejects(requestJSON(s.fetch, new URL("/api/game/versions", url), {}, "Catalog", token, 1000), (error) => {
+    assert.equal(error.status, 500);
+    assert.equal(error.errorCode, 1012);
+    assert.equal(error.uncertain, false);
+    assert.equal(error.message.includes(token), false);
+    return true;
+  });
+  assert.equal(s.requests.length, 1);
   assert.equal(s.uploads.length, 0);
 });
 

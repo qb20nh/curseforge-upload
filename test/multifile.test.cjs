@@ -664,6 +664,49 @@ test("uncertain main requires reconciliation and accepted ID supplies the parent
   assert.deepEqual(after.files.map((file) => file.state), ["accepted", "accepted", "accepted"]);
 });
 
+for (const failedIndex of [0, 1])
+  test(`HTTP 500 after storing ${failedIndex === 0 ? "main" : "attachment"} blocks resume until accepted-ID reconciliation`, async (t) => {
+    const f = await family(t);
+    const stored = new Map();
+    const s = await server(t, {
+      respond: (_req, res, record, count) => {
+        const id = 700 + count;
+        stored.set(id, parseUpload(record));
+        const failed = count === failedIndex + 1;
+        res.writeHead(failed ? 500 : 201);
+        res.end(JSON.stringify(failed ? { errorMessage: "Failed after storing the file" } : { id }));
+      },
+    });
+    const first = actionCore(f.inputs);
+    await runAction(first, { fetch: s.fetch, receiptDirectory: f.dir });
+    assert.deepEqual(outputs(first, "id"), []);
+    assert.equal(first.events.filter((event) => event[0] === "failed").length, 1);
+    assert.equal(s.uploads.length, failedIndex + 1);
+    assert.equal(stored.size, failedIndex + 1);
+    const saved = await actionReceipt(first);
+    assert.equal(saved.receipt.files[failedIndex].state, "uncertain");
+    assert.equal(saved.receipt.files[failedIndex].id, null);
+    assert.equal(saved.receipt.parentID, failedIndex === 0 ? null : 701);
+    const blocked = actionCore({ ...f.inputs, receipt: saved.file });
+    await runAction(blocked, { fetch: s.fetch, receiptDirectory: f.dir });
+    assert.deepEqual(outputs(blocked, "id"), []);
+    assert.match(blocked.events.find((event) => event[0] === "failed")[1], /uncertain|reconcil/i);
+    assert.equal(s.uploads.length, failedIndex + 1);
+    assert.equal(stored.size, failedIndex + 1);
+    Object.assign(saved.receipt.files[failedIndex], { state: "accepted", id: 701 + failedIndex });
+    await fs.writeFile(saved.file, JSON.stringify(saved.receipt));
+    const resumed = actionCore({ ...f.inputs, receipt: saved.file });
+    await runAction(resumed, { fetch: s.fetch, receiptDirectory: f.dir });
+    assert.equal(resumed.events.filter((event) => event[0] === "failed").length, 0);
+    assert.deepEqual(outputs(resumed, "id"), [["output", "id", "701"]]);
+    assert.equal(s.uploads.length, 3);
+    assert.equal(stored.size, 3);
+    assert.deepEqual([...stored.values()].map((file) => file.filename), f.files.map((file) => path.basename(file.file)));
+    const after = await actionReceipt(resumed);
+    assert.deepEqual(after.receipt.files.map((file) => file.id), [701, 702, 703]);
+    assert.deepEqual(after.receipt.files.map((file) => file.state), ["accepted", "accepted", "accepted"]);
+  });
+
 for (const reconcile of ["none", "pending", "accepted"])
   test(`uncertain attachment requires dashboard reconciliation: ${reconcile}`, async (t) => {
     const f = await family(t);

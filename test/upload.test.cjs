@@ -306,7 +306,7 @@ for (const [status, body, uncertain] of [
   [200, '{"id":9007199254740992}', true],
   [401, "unauthorized", false],
   [429, "rate limited", false],
-  [500, "server error", false],
+  [500, "server error", true],
   [302, "redirect", false],
 ])
   test(`upload response ${status} ${body}`, async (t) => {

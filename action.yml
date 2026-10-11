@@ -32,6 +32,10 @@ inputs:
   release_type:
     description: 'The type of this release. Allowed values: "alpha", "beta", "release".'
     required: false
+  manual_release:
+    description: "Keep the file unpublished after approval until you release it from the CurseForge dashboard."
+    required: false
+    default: "false"
   relations:
     description: 'List of projects this file is related to and their relation type. Separate with "," (no quotes). Format: projectslug:relationType - Valid relationTypes are: embeddedLibrary, incompatible, optionalDependency, requiredDependency, and tool'
     required: false

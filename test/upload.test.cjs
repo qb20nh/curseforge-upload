@@ -51,6 +51,19 @@ test("defaults, numeric versions, native multipart bytes and basename", async (t
   });
 });
 
+for (const value of ["true", "false"])
+  test(`manual release ${value} uses boolean metadata`, async (t) => {
+    const f = await fixture(t);
+    const s = await server(t);
+    const core = actionCore({ ...input(f.file), manual_release: value });
+    await runAction(core, { fetch: s.fetch });
+    assert.equal(core.events.filter((e) => e[0] === "failed").length, 0);
+    assert.equal(s.uploads.length, 1);
+    const data = multipart({ headers: s.uploads[0].headers }, s.uploads[0].body);
+    assert.equal(data.metadata.isMarkedForManualRelease, value === "true");
+    assert.deepEqual(core.events.find((e) => e[0] === "output"), ["output", "id", "987"]);
+  });
+
 test("explicit metadata and relative path with spaces", async (t) => {
   const f = await fixture(t);
   const s = await server(t);
@@ -163,6 +176,8 @@ for (const [key, value] of [
   ["game_endpoint", "-bad"],
   ["game_endpoint", "a".repeat(64)],
   ["release_type", "stable"],
+  ["manual_release", "yes"],
+  ["manual_release", "False"],
   ["changelog_type", "json"],
   ["relations", "slug"],
   ["relations", ":tool"],

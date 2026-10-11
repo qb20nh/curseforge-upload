@@ -26,6 +26,7 @@ Supported platforms are GitHub-hosted Ubuntu, Windows and macOS runners. Self-ho
 | `file_path` | Readable regular file; absolute or relative to the current working directory. Spaces are supported; the uploaded filename is its basename. | — | Yes |
 | `game_versions` | Comma-separated positive numeric IDs, names/slugs, or `type:version` selections. | Omitted | No |
 | `release_type` | `alpha`, `beta`, or `release`. | `release` | No |
+| `manual_release` | `true` keeps an approved file unpublished until you release it from the CurseForge dashboard. | `false` | No |
 | `display_name` | Display name; when omitted CurseForge uses the filename. | Omitted | No |
 | `changelog` | Changelog text. | Empty | No |
 | `changelog_type` | `text`, `html`, or `markdown`. | `markdown` | No |
@@ -80,6 +81,8 @@ jobs:
 ```
 
 Each invocation uploads exactly one file. The primary mod is uploaded first; separate sources-JAR and evidence-ZIP steps refer to its returned ID. Create those files in your own build before uploading.
+
+For releases with required attachments, set `manual_release: 'true'` on the primary upload. Wait for the parent to finish processing, upload the attachments, and check their approval before releasing the parent from the dashboard. The upload API does not provide a documented batch upload or atomic publication operation. A returned file ID confirms acceptance, not readiness for attachments.
 
 Obtain the existing upload token at <https://www.curseforge.com/account/api-tokens> and store it as a repository secret. The action masks it immediately. It is sent only in the authentication header, never in URLs or metadata.
 

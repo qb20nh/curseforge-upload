@@ -12,6 +12,7 @@ const INPUTS = [
   "parent_file_id",
   "game_versions",
   "release_type",
+  "manual_release",
   "relations",
 ];
 const RELATION_TYPES = new Set([
@@ -81,6 +82,9 @@ async function validate(inputs) {
   }
   const releaseType = inputs.release_type || "release";
   const changelogType = inputs.changelog_type || "markdown";
+  const manualRelease = inputs.manual_release || "";
+  if (manualRelease && !["true", "false"].includes(manualRelease))
+    throw new Error("manual_release must be true or false.");
   if (!["alpha", "beta", "release"].includes(releaseType))
     throw new Error("release_type must be alpha, beta or release.");
   if (!["text", "html", "markdown"].includes(changelogType))
@@ -112,6 +116,8 @@ async function validate(inputs) {
   };
   if (inputs.display_name) metadata.displayName = inputs.display_name;
   if (parentID) metadata.parentFileID = parentID;
+  if (manualRelease)
+    metadata.isMarkedForManualRelease = manualRelease === "true";
   if (projects.length) metadata.relations = { projects };
   // Open the file before any catalog request; FormData later streams its backing file.
   const blob = await fs.openAsBlob(file);

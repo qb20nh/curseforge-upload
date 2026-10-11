@@ -1,17 +1,23 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
+const { requestJSON, uploadFile, redact } = require("./transport");
+const { prepareReceipt, readReceipt } = require("./receipts");
 const { EnvHttpProxyAgent } = require("undici");
 
 const INPUTS = [
   "project_id",
   "game_endpoint",
   "file_path",
+  "additional_files",
+  "receipt",
   "changelog",
   "changelog_type",
   "display_name",
   "parent_file_id",
   "game_versions",
   "release_type",
+  "manual_release",
   "relations",
 ];
 const RELATION_TYPES = new Set([
@@ -21,8 +27,6 @@ const RELATION_TYPES = new Set([
   "requiredDependency",
   "tool",
 ]);
-const UNCERTAIN =
-  " Upload result is uncertain; check project files before retrying.";
 
 function positiveID(value, label) {
   if (
@@ -33,10 +37,6 @@ function positiveID(value, label) {
     throw new Error(`${label} must be a positive safe integer.`);
   }
   return Number(value);
-}
-
-function redact(text, token) {
-  return token ? String(text).split(token).join("[REDACTED]") : String(text);
 }
 
 function versionEntries(value) {
@@ -70,17 +70,11 @@ async function validate(inputs) {
     throw new Error("game_endpoint must be one valid DNS label.");
   const file = inputs.file_path;
   if (!file) throw new Error("file_path is required.");
-  try {
-    const stat = await fs.promises.stat(file);
-    if (!stat.isFile()) throw new Error("not a regular file");
-    await fs.promises.access(file, fs.constants.R_OK);
-  } catch (error) {
-    throw new Error(
-      `Upload file is not a readable regular file: ${file} (${error.code || error.message}).`,
-    );
-  }
   const releaseType = inputs.release_type || "release";
   const changelogType = inputs.changelog_type || "markdown";
+  const manualRelease = inputs.manual_release || "auto";
+  if (!["auto", "true", "false"].includes(manualRelease))
+    throw new Error("manual_release must be auto, true or false.");
   if (!["alpha", "beta", "release"].includes(releaseType))
     throw new Error("release_type must be alpha, beta or release.");
   if (!["text", "html", "markdown"].includes(changelogType))
@@ -105,101 +99,82 @@ async function validate(inputs) {
         );
       return { slug: pair[0], type: pair[1] };
     });
-  const metadata = {
-    changelog: inputs.changelog || "",
-    changelogType,
-    releaseType,
-  };
-  if (inputs.display_name) metadata.displayName = inputs.display_name;
-  if (parentID) metadata.parentFileID = parentID;
-  if (projects.length) metadata.relations = { projects };
-  // Open the file before any catalog request; FormData later streams its backing file.
-  const blob = await fs.openAsBlob(file);
+  const selected = [
+    file,
+    ...(inputs.additional_files || "")
+      .split(/\r?\n/)
+      .filter((entry) => entry !== ""),
+  ];
+  const multiFile = selected.length > 1;
+  if (!parentID && multiFile && manualRelease === "false")
+    throw new Error(
+      "manual_release: false is unsafe for a new main file with additional_files; use auto or true to hold the main file until every attachment is accepted and approved.",
+    );
+  const managed = multiFile || Boolean(inputs.receipt);
+  if (
+    managed && (inputs.receipt?.includes(inputs.token) ||
+      entries.some((entry) => entry.entry.includes(inputs.token)))
+  )
+    throw new Error(
+      "Receipt paths and version selections must not contain the API token.",
+    );
+  const shared = { changelog: inputs.changelog || "", changelogType, releaseType };
+  if (projects.length) shared.relations = { projects };
+  const seen = new Set();
+  const files = [];
+  for (const [index, selectedPath] of selected.entries()) {
+    let blob, canonical;
+    try {
+      const stat = await fs.promises.stat(selectedPath);
+      if (!stat.isFile()) throw new Error("not a regular file");
+      await fs.promises.access(selectedPath, fs.constants.R_OK);
+      canonical = await fs.promises.realpath(selectedPath);
+      blob = await fs.openAsBlob(selectedPath);
+    } catch (error) {
+      throw new Error(
+        `Upload file is not a readable regular file: ${selectedPath} (${error.code || error.message}).`,
+      );
+    }
+    if (seen.has(canonical))
+      throw new Error(`Duplicate upload path: ${selectedPath}.`);
+    seen.add(canonical);
+    const attachment = Boolean(parentID) || index > 0;
+    const metadata = { ...shared };
+    if (attachment) {
+      metadata.displayName = path.basename(selectedPath);
+      metadata.parentFileID = parentID;
+    } else if (inputs.display_name) metadata.displayName = inputs.display_name;
+    if (manualRelease !== "auto")
+      metadata.isMarkedForManualRelease = manualRelease === "true";
+    else if (!attachment && multiFile) metadata.isMarkedForManualRelease = true;
+    let sha256;
+    if (managed) {
+      const hash = createHash("sha256");
+      for await (const chunk of blob.stream()) hash.update(chunk);
+      sha256 = hash.digest("hex");
+      // A receipt contains the submitted metadata and paths, never credentials.
+      if (
+        selectedPath.includes(inputs.token) ||
+        JSON.stringify(metadata).includes(inputs.token)
+      )
+        throw new Error(
+          "Upload paths and metadata must not contain the API token when saving a receipt.",
+        );
+    }
+    files.push({ path: selectedPath, blob, sha256, metadata });
+  }
+  if (inputs.receipt) {
+    const receiptPath = await fs.promises.realpath(inputs.receipt);
+    if (seen.has(receiptPath)) throw new Error("receipt cannot also be an upload file.");
+  }
   return {
     base: new URL(`https://${endpoint}.curseforge.com`),
     projectID,
-    file,
-    blob,
-    metadata,
+    files,
     entries,
+    parentID,
+    managed,
   };
-}
-
-async function responseExcerpt(response, token) {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const limit = 4096 + Buffer.byteLength(token);
-  const chunks = [];
-  let size = 0;
-  try {
-    while (size < limit) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = Buffer.from(value).subarray(0, limit - size);
-      chunks.push(chunk);
-      size += chunk.length;
-    }
-  } finally {
-    await reader.cancel();
-  }
-  // Read beyond the display limit so a token crossing that limit is redacted whole.
-  const redacted = Buffer.from(
-    redact(Buffer.concat(chunks).toString("utf8"), token),
-  );
-  return new TextDecoder().decode(redacted.subarray(0, 4096), { stream: true });
-}
-
-async function requestJSON(
-  fetch,
-  url,
-  init,
-  operation,
-  token,
-  timeoutMs,
-  uploading = false,
-) {
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(new Error(`Deadline exceeded (${timeoutMs} ms).`)),
-    timeoutMs,
-  );
-  timer.unref();
-  const uncertain = uploading ? UNCERTAIN : "";
-  try {
-    let response;
-    try {
-      // Inspect 3xx ourselves to report the status, without following credentials.
-      response = await fetch(url, {
-        ...init,
-        redirect: "manual",
-        signal: controller.signal,
-      });
-    } catch (error) {
-      throw new Error(
-        `${operation} failed: ${redact(error.message, token)}.${uncertain}`,
-      );
-    }
-    if (!response.ok) {
-      let excerpt;
-      try {
-        excerpt = await responseExcerpt(response, token);
-      } catch (error) {
-        excerpt = `Unable to read response: ${redact(error.message, token)}`;
-      }
-      throw new Error(
-        `${operation} failed (HTTP ${response.status}): ${excerpt}`,
-      );
-    }
-    try {
-      return { data: await response.json(), status: response.status };
-    } catch (error) {
-      throw new Error(
-        `${operation} failed (HTTP ${response.status}): ${controller.signal.aborted ? "deadline exceeded while reading JSON response" : "invalid or incomplete JSON response"}.${uncertain}`,
-      );
-    }
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function uniqueMatch(matches, label) {
@@ -283,78 +258,189 @@ async function resolveVersions(
   return [...new Set(ids)];
 }
 
+function progressSummary(receipt, complete) {
+  const accepted = receipt.data.files.filter((file) => file.state === "accepted");
+  const pending = receipt.data.files.filter((file) => file.state !== "accepted");
+  const describe = (files) => files
+    .map((file) =>
+      `${path.basename(file.path)}${file.id ? ` (ID ${file.id})` : ` (${file.state})`}`,
+    ).join(", ") || "none";
+  const retries = receipt.data.files.reduce(
+    (sum, file) => sum + Math.max(0, file.attempts - 1), 0,
+  );
+  const held = receipt.data.selectedParentID === null &&
+    receipt.data.files[0].metadata.isMarkedForManualRelease === true;
+  return `${complete ? "Complete upload" : "Partial upload"}; parent ID: ${receipt.data.parentID || "not accepted"}; accepted: ${describe(accepted)}; pending: ${describe(pending)}; retry attempts: ${retries}; receipt: ${receipt.path}. ${held ? "The main file is held for manual release; after every required file is accepted and approved, release it from the dashboard." : "API acceptance does not confirm approval or public release."}`;
+}
+
 async function upload(
   inputs,
   {
     fetch: fetchOverride,
     catalogTimeoutMs = 30_000,
     uploadTimeoutMs = 600_000,
+    now, wait, onReceipt, onProgress, receiptDirectory,
   } = {},
 ) {
   const config = await validate(inputs);
-  let dispatcher;
-  const fetch =
-    fetchOverride ||
-    ((url, init) => {
-      if (!dispatcher) {
-        try {
-          dispatcher = new EnvHttpProxyAgent();
-        } catch {
-          // Proxy URLs may include credentials; do not echo them in errors.
-          throw new Error("Invalid HTTP_PROXY/HTTPS_PROXY configuration.");
-        }
+  let dispatcher, receipt;
+  const ensureDispatcher = () => {
+    if (!dispatcher) {
+      try {
+        dispatcher = new EnvHttpProxyAgent();
+      } catch {
+        // Proxy URLs can contain credentials; never include them in errors.
+        throw new Error("Invalid HTTP_PROXY/HTTPS_PROXY configuration.");
       }
-      return globalThis.fetch(url, { ...init, dispatcher });
-    });
+    }
+    return dispatcher;
+  };
+  const fetch = fetchOverride || ((url, init) =>
+    globalThis.fetch(url, { ...init, dispatcher: ensureDispatcher() }));
   try {
     const headers = { "X-Api-Token": inputs.token };
-    const versions = await resolveVersions(
-      config.entries,
-      config.base,
-      headers,
-      fetch,
-      inputs.token,
-      catalogTimeoutMs,
-    );
-    if (versions.length) config.metadata.gameVersions = versions;
-    const form = new FormData();
-    form.append("file", config.blob, path.basename(config.file));
-    form.append("metadata", JSON.stringify(config.metadata));
-    // One POST only: retrying a request with a lost response can create duplicate files.
-    const result = await requestJSON(
-      fetch,
-      new URL(`/api/projects/${config.projectID}/upload-file`, config.base),
-      { method: "POST", headers, body: form },
-      "Upload",
-      inputs.token,
-      uploadTimeoutMs,
-      true,
-    );
-    try {
+    let candidate, versions;
+    if (inputs.receipt) {
+      await onReceipt?.(path.resolve(inputs.receipt));
+      candidate = await readReceipt(inputs.receipt);
+      // Numeric selections can be checked locally; named selections reuse the
+      // trusted receipt's original catalog resolution without a network request.
+      versions = config.entries.every((entry) => entry.versionID !== null)
+        ? [...new Set(config.entries.map((entry) => entry.versionID))]
+        : candidate.files?.[0]?.metadata?.gameVersions || [];
       if (
-        typeof result.data?.id !== "number" &&
-        typeof result.data?.id !== "string"
+        !Array.isArray(versions) ||
+        versions.some((id) => !Number.isSafeInteger(id) || id <= 0)
       )
-        throw new Error("missing file ID");
-      return String(positiveID(result.data.id, "Response file ID"));
-    } catch {
-      throw new Error(
-        `Upload failed (HTTP ${result.status}): response must contain a positive safe-integer file ID.${UNCERTAIN}`,
+        throw new Error("Receipt contains invalid game versions.");
+    } else {
+      versions = await resolveVersions(
+        config.entries, config.base, headers, fetch, inputs.token, catalogTimeoutMs,
       );
     }
+    if (!config.parentID && versions.length)
+      config.files[0].metadata.gameVersions = versions;
+    if (config.managed) {
+      receipt = await prepareReceipt({
+        projectID: config.projectID,
+        endpoint: config.base.origin,
+        selectedParentID: config.parentID,
+        files: config.files,
+        versionSelection: config.entries.map((entry) => entry.entry),
+        receipt: inputs.receipt, candidate, receiptDirectory,
+      });
+      if (!inputs.receipt) await onReceipt?.(receipt.path);
+    }
+    const url = new URL(`/api/projects/${config.projectID}/upload-file`, config.base);
+    let parentID = receipt?.data.parentID || config.parentID;
+    let firstID;
+    for (const [index, file] of config.files.entries()) {
+      const record = receipt?.data.files[index];
+      if (record?.state === "accepted") {
+        if (index === 0) firstID = record.id;
+        continue;
+      }
+      if (config.parentID || index > 0) file.metadata.parentFileID = parentID;
+      let id;
+      try {
+        // Local proxy validation cannot leave an upload marked in flight.
+        if (!fetchOverride) ensureDispatcher();
+        id = await uploadFile({
+          fetch, url, headers,
+          blob: file.blob,
+          file: file.path,
+          metadata: file.metadata,
+          token: inputs.token,
+          timeoutMs: uploadTimeoutMs,
+          now, wait,
+          onAttempt: async (attempt) => {
+            if (record) {
+              record.metadata = file.metadata;
+              record.state = "uploading";
+              record.attempts += 1;
+              await receipt.save();
+            }
+            if (attempt > 1)
+              await onProgress?.(
+                `Retrying attachment ${path.basename(file.path)} (attempt ${attempt}/7): parent unavailable or invalid (error 1012).`,
+              );
+          },
+          onRetryableRejection: async () => {
+            if (record) {
+              record.state = "pending";
+              await receipt.save();
+            }
+          },
+        });
+      } catch (error) {
+        if (record) {
+          record.state = error.uncertain ? "uncertain" : "pending";
+          try {
+            await receipt.save();
+          } catch {
+            throw new Error(
+              `${error.message} Receipt update failed; the saved in-flight state requires dashboard reconciliation.`,
+            );
+          }
+        }
+        throw error;
+      }
+      if (index === 0) firstID = id;
+      if (!config.parentID && index === 0) {
+        parentID = id;
+        if (receipt) {
+          receipt.data.parentID = id;
+          for (const attachment of receipt.data.files.slice(1))
+            attachment.metadata.parentFileID = id;
+        }
+      }
+      if (record) {
+        record.id = id;
+        record.state = "accepted";
+        try {
+          await receipt.save();
+        } catch {
+          throw new Error(
+            `File ${path.basename(file.path)} was accepted as ID ${id}, but saving the receipt failed. Check the dashboard and reconcile the saved in-flight entry before retrying.`,
+          );
+        }
+      }
+    }
+    if (receipt) await onProgress?.(progressSummary(receipt, true));
+    return String(firstID);
+  } catch (error) {
+    if (!receipt && !inputs.receipt && error.receiptPath)
+      await onReceipt?.(error.receiptPath);
+    if (receipt) error.message += ` ${progressSummary(receipt, false)}`;
+    throw error;
   } finally {
     await dispatcher?.close();
   }
 }
 
-async function runAction(core, options) {
+async function runAction(core, options = {}) {
   let token = "";
   try {
     token = core.getInput("token");
     if (token) core.setSecret(token);
     const inputs = { token };
-    for (const name of INPUTS) inputs[name] = core.getInput(name);
-    const id = await upload(inputs, options);
+    for (const name of INPUTS)
+      inputs[name] = core.getInput(
+        name,
+        ["file_path", "additional_files", "receipt"].includes(name)
+          ? { trimWhitespace: false } : undefined,
+      );
+    const id = await upload(inputs, {
+      ...options,
+      onReceipt: async (receiptPath) => {
+        core.setOutput("receipt", receiptPath);
+        await options.onReceipt?.(receiptPath);
+      },
+      onProgress: async (message) => {
+        core.info?.(redact(message, token));
+        await options.onProgress?.(redact(message, token));
+      },
+    });
     core.setOutput("id", id);
   } catch (error) {
     core.setFailed(redact(error.message, token));

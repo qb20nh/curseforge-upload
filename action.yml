@@ -12,8 +12,14 @@ inputs:
     description: "The subdomain of curseforge.com where the upload request will be made. (minecraft, kerbal, etc.)"
     required: true
   file_path:
-    description: "The path to the file you want to upload"
+    description: "Exact path to the main file, or an attachment when parent_file_id is supplied."
     required: true
+  additional_files:
+    description: "Additional attachment paths, one exact path per line. Spaces are supported; glob patterns are not expanded."
+    required: false
+  receipt:
+    description: "Path to a saved upload receipt to resume. Files and metadata must match; uncertain uploads require dashboard reconciliation first."
+    required: false
   changelog:
     description: "The changelog text to put on the file."
     required: false
@@ -21,10 +27,10 @@ inputs:
     description: 'The type of the changelog. Allowed values: "text", "html" (aka. WYSIWYG), "markdown".'
     required: false
   display_name:
-    description: "The display name for this file. Defaults to the filename."
+    description: "New main file's display name. Defaults to the filename; attachments always use their filenames."
     required: false
   parent_file_id:
-    description: "The id of the parent file to put this file under. Defaults to none. (IDs are integers)"
+    description: "Positive numeric ID of an existing parent. All selected files become attachments and inherit its game versions; omit game_versions."
     required: false
   game_versions:
     description: 'The game version IDs to select on this file. Separate IDs with "," (no quotes). See README for more info.'
@@ -32,12 +38,18 @@ inputs:
   release_type:
     description: 'The type of this release. Allowed values: "alpha", "beta", "release".'
     required: false
+  manual_release:
+    description: "auto preserves ordinary single-file publication and holds a new main file with attachments for dashboard release. true holds the file; false is rejected for a new main file with attachments."
+    required: false
+    default: "auto"
   relations:
     description: 'List of projects this file is related to and their relation type. Separate with "," (no quotes). Format: projectslug:relationType - Valid relationTypes are: embeddedLibrary, incompatible, optionalDependency, requiredDependency, and tool'
     required: false
 outputs:
   id:
-    description: "The ID of the file created."
+    description: "Accepted ID of file_path, emitted only when every selected file was accepted."
+  receipt:
+    description: "Upload receipt path for multi-file or receipt-based runs, including failed runs. Preserve it with an if: always() artifact step."
 runs:
   using: "node24"
   main: "dist/index.js"

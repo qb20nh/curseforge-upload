@@ -66843,6 +66843,7 @@ async function atomicSave(receiptPath, data) {
 
 async function prepareReceipt(config) {
   let receiptPath = config.receipt;
+  let validatedData;
   try {
     let data;
     let reconciled = false;
@@ -66892,23 +66893,100 @@ async function prepareReceipt(config) {
       }
     };
     await separateFromUploads(receiptPath, config.files);
+    validatedData = data;
     if (config.receipt) {
       const uploading = data.files.filter((file) => file.state === "uploading");
       for (const file of uploading) file.state = "uncertain";
       if (uploading.length || reconciled) await save();
-      if (data.files.some((file) => file.state === "uncertain"))
+      if (data.files.some((file) => file.state === "uncertain")) {
         throw new Error(
           "Receipt contains an uncertain upload. Check the CurseForge dashboard and manually reconcile its ID and state before resuming.",
         );
+      }
     } else await save();
     return { path: receiptPath, data, save };
   } catch (error) {
     if (receiptPath) error.receiptPath = receiptPath;
+    if (validatedData) error.receiptData = validatedData;
     throw error;
   }
 }
 
 module.exports = { prepareReceipt, readReceipt };
+
+
+/***/ }),
+
+/***/ 9190:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const path = __nccwpck_require__(6760);
+const { redact } = __nccwpck_require__(8629);
+
+function publicationStatus(report) {
+  const { files, selectedParentID } = report;
+  if (report.failed || !files.length || !files.every((file) => file.state === "accepted"))
+    return "unknown";
+  const heldMain = selectedParentID === null &&
+    files[0].metadata?.isMarkedForManualRelease === true;
+  const heldFiles = files.every(
+    (file) => file.metadata?.isMarkedForManualRelease === true,
+  );
+  return heldMain || heldFiles ? "held" : "unknown";
+}
+
+function nextAction(report) {
+  const uncertain = report.reconciliation ? [report.reconciliation] : report.files.filter(
+    (file) => ["uploading", "uncertain"].includes(file.state),
+  );
+  if (uncertain.length) {
+    const names = uncertain.map((file) =>
+      `${path.basename(file.path)}${file.id ? ` (ID ${file.id})` : ""}`,
+    ).join(", ");
+    return `Reconcile ${names} in the CurseForge dashboard before ${report.receiptPath ? "resuming the saved receipt" : "retrying the upload"}.`;
+  }
+  if (report.files.some((file) => file.state === "unknown"))
+    return "Fix the reported error and validate the saved receipt in the CurseForge dashboard before resuming.";
+  if (!report.files.length || report.files.some((file) => file.state === "not attempted"))
+    return "Fix the reported input error before rerunning the action.";
+  if (!report.files.every((file) => file.state === "accepted"))
+    return report.receiptPath
+      ? "Fix the reported error, then resume only missing files using the saved receipt."
+      : "Fix the reported error before retrying the upload.";
+  if (report.failed && report.receiptPath)
+    return "Reconcile the saved receipt with the accepted file IDs in the CurseForge dashboard before resuming.";
+  return publicationStatus(report) === "held"
+    ? "Check every selected file's approval in the CurseForge dashboard, release the held files only after the complete set is approved, then verify every selected file is public."
+    : "Verify approval and publication of every selected file in the CurseForge dashboard.";
+}
+
+function renderSummary(report, token) {
+  // Actions' summary helpers accept raw HTML; escape every user-controlled value.
+  const escape = (value) => redact(value, token)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+  const status = publicationStatus(report);
+  const rows = report.files.map((file) => {
+    const publication = file.state === "accepted" &&
+      file.metadata?.isMarkedForManualRelease === true
+      ? "held (requested)" : "unknown";
+    const cells = [path.basename(file.path), file.id || "unknown", file.state,
+      "unknown", publication].map((value) => `<td>${escape(value)}</td>`);
+    return `<tr>${cells.join("")}</tr>`;
+  });
+  let summary = `<h3>CurseForge upload</h3>\n<p>Publication status: ${status}. Approval and public visibility are unverified; a hold reflects the requested upload policy.</p>\n`;
+  summary += "<table><tr><th>File</th><th>ID</th><th>Upload</th><th>Moderation</th><th>Publication</th></tr>" + rows.join("") + "</table>\n";
+  if (report.selectedParentID)
+    summary += `<p>Existing parent ID: ${escape(report.selectedParentID)}. Its visibility is unverified; adding attachments cannot guarantee that the parent stays private.</p>\n`;
+  if (report.receiptPath)
+    summary += `<p>Receipt: <code>${escape(report.receiptPath)}</code></p>\n`;
+  return summary + `<p>Next action: ${escape(nextAction(report))}</p>\n`;
+}
+
+module.exports = { publicationStatus, renderSummary };
 
 
 /***/ }),
@@ -67191,6 +67269,7 @@ const { createHash } = __nccwpck_require__(7598);
 const { requestJSON, uploadFile, redact } = __nccwpck_require__(8629);
 const { prepareReceipt, readReceipt } = __nccwpck_require__(2623);
 const { EnvHttpProxyAgent } = __nccwpck_require__(6752);
+const { publicationStatus, renderSummary } = __nccwpck_require__(9190);
 
 const INPUTS = [
   "project_id",
@@ -67457,7 +67536,7 @@ function progressSummary(receipt, complete) {
   );
   const held = receipt.data.selectedParentID === null &&
     receipt.data.files[0].metadata.isMarkedForManualRelease === true;
-  return `${complete ? "Complete upload" : "Partial upload"}; parent ID: ${receipt.data.parentID || "not accepted"}; accepted: ${describe(accepted)}; pending: ${describe(pending)}; retry attempts: ${retries}; receipt: ${receipt.path}. ${held ? "The main file is held for manual release; after every required file is accepted and approved, release it from the dashboard." : "API acceptance does not confirm approval or public release."}`;
+  return `${complete ? "Complete upload" : "Partial upload"}; parent ID: ${receipt.data.parentID || "not accepted"}; accepted: ${describe(accepted)}; pending: ${describe(pending)}; retry attempts: ${retries}; receipt: ${receipt.path}. ${held ? "The main file is configured to be held for manual release; approval and public visibility are unverified. After every required file is accepted and approved, release the held files from the dashboard." : "API acceptance does not confirm approval or public release."}`;
 }
 
 async function upload(
@@ -67466,11 +67545,23 @@ async function upload(
     fetch: fetchOverride,
     catalogTimeoutMs = 30_000,
     uploadTimeoutMs = 600_000,
-    now, wait, onReceipt, onProgress, receiptDirectory,
+    now, wait, onReceipt, onProgress, onReport, receiptDirectory,
   } = {},
 ) {
+  // Preserve a supplied receipt even when local preflight fails, without
+  // trusting its contents or exposing a credential embedded in its path.
+  if (inputs.receipt && (!inputs.token || !inputs.receipt.includes(inputs.token)))
+    await onReceipt?.(path.resolve(inputs.receipt));
   const config = await validate(inputs);
-  let dispatcher, receipt;
+  let dispatcher, receipt, reconciliation;
+  let reportReceiptPath = inputs.receipt;
+  let reportData = {
+    selectedParentID: config.parentID,
+    files: config.files.map((file) => ({
+      path: file.path, metadata: file.metadata, id: null,
+      state: inputs.receipt ? "unknown" : "pending", attempts: 0,
+    })),
+  };
   const ensureDispatcher = () => {
     if (!dispatcher) {
       try {
@@ -67488,7 +67579,6 @@ async function upload(
     const headers = { "X-Api-Token": inputs.token };
     let candidate, versions;
     if (inputs.receipt) {
-      await onReceipt?.(path.resolve(inputs.receipt));
       candidate = await readReceipt(inputs.receipt);
       // Numeric selections can be checked locally; named selections reuse the
       // trusted receipt's original catalog resolution without a network request.
@@ -67516,13 +67606,14 @@ async function upload(
         versionSelection: config.entries.map((entry) => entry.entry),
         receipt: inputs.receipt, candidate, receiptDirectory,
       });
+      reportData = receipt.data;
       if (!inputs.receipt) await onReceipt?.(receipt.path);
     }
     const url = new URL(`/api/projects/${config.projectID}/upload-file`, config.base);
     let parentID = receipt?.data.parentID || config.parentID;
     let firstID;
     for (const [index, file] of config.files.entries()) {
-      const record = receipt?.data.files[index];
+      const record = reportData.files[index];
       if (record?.state === "accepted") {
         if (index === 0) firstID = record.id;
         continue;
@@ -67545,7 +67636,7 @@ async function upload(
               record.metadata = file.metadata;
               record.state = "uploading";
               record.attempts += 1;
-              await receipt.save();
+              await receipt?.save();
             }
             if (attempt > 1)
               await onProgress?.(
@@ -67555,7 +67646,7 @@ async function upload(
           onRetryableRejection: async () => {
             if (record) {
               record.state = "pending";
-              await receipt.save();
+              await receipt?.save();
             }
           },
         });
@@ -67563,8 +67654,9 @@ async function upload(
         if (record) {
           record.state = error.uncertain ? "uncertain" : "pending";
           try {
-            await receipt.save();
+            await receipt?.save();
           } catch {
+            reconciliation = { path: file.path, id: record.id };
             throw new Error(
               `${error.message} Receipt update failed; the saved in-flight state requires dashboard reconciliation.`,
             );
@@ -67585,8 +67677,9 @@ async function upload(
         record.id = id;
         record.state = "accepted";
         try {
-          await receipt.save();
+          await receipt?.save();
         } catch {
+          reconciliation = { path: file.path, id };
           throw new Error(
             `File ${path.basename(file.path)} was accepted as ID ${id}, but saving the receipt failed. Check the dashboard and reconcile the saved in-flight entry before retrying.`,
           );
@@ -67596,21 +67689,33 @@ async function upload(
     if (receipt) await onProgress?.(progressSummary(receipt, true));
     return String(firstID);
   } catch (error) {
+    // Only receipt data that passed identity validation may supply remote IDs.
+    if (error.receiptData) reportData = error.receiptData;
+    if (error.receiptPath) reportReceiptPath = error.receiptPath;
     if (!receipt && !inputs.receipt && error.receiptPath)
       await onReceipt?.(error.receiptPath);
     if (receipt) error.message += ` ${progressSummary(receipt, false)}`;
     throw error;
   } finally {
-    await dispatcher?.close();
+    try {
+      await dispatcher?.close();
+    } finally {
+      await onReport?.({
+        ...reportData,
+        receiptPath: receipt?.path || reportReceiptPath,
+        reconciliation,
+      });
+    }
   }
 }
 
 async function runAction(core, options = {}) {
   let token = "";
+  let inputs = {}, report;
   try {
     token = core.getInput("token");
     if (token) core.setSecret(token);
-    const inputs = { token };
+    inputs = { token };
     for (const name of INPUTS)
       inputs[name] = core.getInput(
         name,
@@ -67627,10 +67732,30 @@ async function runAction(core, options = {}) {
         core.info?.(redact(message, token));
         await options.onProgress?.(redact(message, token));
       },
+      onReport: (value) => { report = value; },
     });
     core.setOutput("id", id);
   } catch (error) {
+    if (report) report.failed = true;
     core.setFailed(redact(error.message, token));
+  } finally {
+    report ||= {
+      selectedParentID: null,
+      failed: true,
+      files: [inputs.file_path, ...(inputs.additional_files || "").split(/\r?\n/)]
+        .filter(Boolean).map((file) => ({
+          path: file, id: null, state: inputs.receipt ? "unknown" : "not attempted",
+        })),
+      receiptPath: inputs.receipt,
+    };
+    core.setOutput("publication_status", publicationStatus(report));
+    if (core.summary && process.env.GITHUB_STEP_SUMMARY) {
+      try {
+        await core.summary.addRaw(renderSummary(report, token)).write();
+      } catch {
+        core.warning?.("Could not write the CurseForge job summary; check the action logs and saved receipt.");
+      }
+    }
   }
 }
 

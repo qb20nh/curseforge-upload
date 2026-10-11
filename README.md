@@ -28,12 +28,30 @@ Supported platforms are GitHub-hosted Ubuntu, Windows and macOS runners. Self-ho
 | `receipt` | Path to a saved upload receipt to resume with the same files and metadata. | Omitted | No |
 | `game_versions` | Comma-separated positive numeric IDs, names/slugs, or `type:version` selections. | Omitted | No |
 | `release_type` | `alpha`, `beta`, or `release`. | `release` | No |
-| `manual_release` | `auto` preserves ordinary single-file behavior and holds a new main file with attachments for dashboard release. `true` holds the file after approval. Explicit `false` is rejected for a new main file with attachments before requests. The API receives a Boolean, never `auto`. | `auto` | No |
+| `manual_release` | `auto` preserves ordinary single-file behavior and requests a hold for a new main file with attachments. `true` requests a hold for every selected file. Explicit `false` is rejected for a new main file with attachments before requests. The API receives a Boolean, never `auto`. Dashboard release remains manual. | `auto` | No |
 | `display_name` | New main file's display name; when omitted CurseForge uses the filename. Attachments use their filenames. | Omitted | No |
 | `changelog` | Changelog text. | Empty | No |
 | `changelog_type` | `text`, `html`, or `markdown`. | `markdown` | No |
 | `relations` | Comma-separated `projectslug:relationType` pairs. Types: `embeddedLibrary`, `incompatible`, `optionalDependency`, `requiredDependency`, `tool`. | Omitted | No |
 | `parent_file_id` | Positive safe-integer existing parent ID. `file_path` and every additional file become attachments and inherit its versions; omit `game_versions`. | Omitted | No |
+
+## Publication policy
+
+**Accepted** means the upload API returned a valid file ID. **Approved** means CurseForge moderation passed. **Released** means the file is public. An accepted upload establishes neither approval nor release; a dashboard file marked “Pending Release” can be an accepted file awaiting manual release.
+
+| Selected files | `manual_release: auto` (default) | `true` | `false` |
+| --- | --- | --- | --- |
+| One new main file | No explicit hold; preserves existing publication behavior | Requests a main-file hold | Submits no-hold policy |
+| New main with attachments | Requests a main-file hold; attachments receive no explicit hold | Requests a hold for every selected file | Rejected before requests |
+| Attachments to `parent_file_id` | No explicit hold on selected attachments | Requests a hold for every selected attachment | Submits no-hold policy on selected attachments |
+
+Existing-parent uploads do not change that parent's publication policy. If it is already public, adding attachments cannot retroactively prevent users seeing an incomplete set. The action does not verify the parent's current visibility.
+
+The [official Upload API documentation](https://support.curseforge.com/en/support/solutions/articles/9000197321-curseforge-upload-api), checked 12 October 2026, documents `isMarkedForManualRelease` for `upload-file`. Its `update-file` operation changes changelog, display name, game versions, release classification and relations; it documents no hold toggle or publication operation. `releaseType` selects alpha/beta/release classification, not visibility. The documented upload-token API provides no file moderation/visibility read or atomic publication operation.
+
+Automatic approval checks, publication and public-state confirmation cannot be delivered through that documented interface. The action adds no automatic-release input or approval wait. After all required files are accepted, verify each file's approval in the dashboard, manually release the held main or selected files held by explicit `true`, and verify every selected file is public. It makes several upload requests, not an atomic batch. Child moderation, visibility before the parent, and whether releasing a parent releases its children remain unverified; a main-file hold is not a verified guarantee about child visibility.
+
+An authorized live check is still needed for attachment acceptance against an approved, unpublished parent and for parent/child publication behavior. Local tests establish request construction and reporting only. Error 1012 means an unavailable or invalid parent; malware scanning is one possible explanation, not a confirmed cause.
 
 ## Workflow example
 
@@ -52,7 +70,7 @@ jobs:
       # Run your build to produce mod.jar, mod-sources.jar and evidence.zip.
       - name: Upload mod and required attachments
         id: mod
-        uses: qb20nh/curseforge-upload@fix/multi-file-upload # Replace with the full approved, pushed commit SHA
+        uses: qb20nh/curseforge-upload@fix/publication-reporting # Replace with the full approved, pushed commit SHA
         with:
           file_path: build/libs/mod.jar
           additional_files: |
@@ -74,9 +92,7 @@ jobs:
 
 Create every selected file before invoking the action. It validates all files and metadata before uploading, accepts the main file once, then uploads attachments sequentially with its numeric ID. Attachment display names use their filenames; they share changelog and release metadata and inherit the parent's game versions. `display_name` applies only to a new main file.
 
-With the default `manual_release: auto`, a new main file with attachments is held unpublished even if an attachment fails. After every required file is accepted and approved, release the main file from the CurseForge dashboard. A complete upload is not a public release. The action makes several upload requests; CurseForge has no documented atomic batch endpoint, and the action does not automatically publish through an undocumented endpoint.
-
-Attachment acceptance against an approved, unpublished parent still needs a live check with explicit authorization. Local tests do not establish that the live platform permits the full sequence. Error 1012 means an unavailable or invalid parent; malware scanning is one possible explanation, not a confirmed cause.
+One invocation handles one main-file family. Consumers select their files, restore build artifacts and receipts, and coordinate matrix jobs or cross-version releases. Project-specific target selection, standalone developer downloads and release-note policy remain in the consuming workflow.
 
 Obtain the existing upload token at <https://www.curseforge.com/account/api-tokens> and store it as a repository secret. The action masks it immediately. It is sent only in the authentication header, never in URLs or metadata.
 
@@ -96,13 +112,28 @@ Catalog requests have a 30-second deadline each. Each file has one 10-minute upl
 
 An attachment retries only after a complete HTTP 400 JSON response with numeric `errorCode` exactly `1012`. It makes at most seven attempts, waiting 2, 4, 8, 16, 30 and 30 seconds between them; the deadline can stop it earlier. Every allowed retry submits the same bytes and metadata. Main uploads, other errors, redirects and uncertain results are never automatically retried.
 
-On complete success, `steps.<step-id>.outputs.id` is the accepted ID of `file_path` as a string. It is emitted only after every selected file has an accepted ID. Failure emits no successful `id`. Multi-file reports distinguish partial and complete uploads and include the parent ID, accepted/pending files, attempt counts and receipt path. API acceptance does not mean moderation is complete or the release is public.
+On complete upload success, `steps.<step-id>.outputs.id` is the accepted ID of `file_path` as a string. It is emitted only after every selected file has an accepted ID. Failure emits no successful `id`. Reports distinguish partial and complete uploads and include the parent ID, accepted/pending files, attempt counts and receipt path.
+
+`steps.<step-id>.outputs.publication_status` is emitted on every action run, including validation and upload failures:
+
+| Value | Meaning |
+| --- | --- |
+| `held` | The action succeeded, every selected upload was accepted, and its submitted metadata requested a hold for the new main file or for every selected existing-parent attachment. Includes the main-file hold selected by multi-file `auto`. Reports accepted upload policy, not an observed dashboard state or verified current visibility. |
+| `pending_approval` | Requires verified server moderation status; never emitted by the current integration. |
+| `public` | Requires verified public state for every selected file; never emitted by the current integration. |
+| `unknown` | All other cases, including failures and accepted uploads without the explicit hold policy above. Approval and visibility are unverified. |
+
+The job summary lists each filename, accepted ID when known, upload state, moderation (`unknown`) and publication (`held (requested)` only for an accepted file with explicit hold metadata, otherwise `unknown`). Hold reporting uses the metadata submitted during this invocation or the original metadata in its trusted saved receipt. Thus a completed default multi-file run can report overall `held` while individual attachments show `unknown`. This does not assert an observed “Pending Release” state, parent or child visibility, or atomic publication. The summary ends with a concrete next action: finish or reconcile uploads, or inspect approval and release in the dashboard.
 
 Failures report the operation and HTTP status when received. Displayed response text is capped at 4 KiB and the token is redacted. HTTP 5xx server errors, timeouts, connection failures, unreadable or truncated error responses, and invalid success responses leave an **uncertain** upload result: the server may already have accepted the upload. A complete server-error response does not establish that no file was created. Check the project's files before retrying.
 
 ## Receipts and resume
 
 Multi-file runs and runs using the `receipt` input expose `steps.<step-id>.outputs.receipt`, including failed uploads. Preserve that file with the always-run artifact step above. Receipt updates are atomic and saved after each accepted upload before the next file starts. Schema version 1 records the project (`projectID`), endpoint, selected parent (`selectedParentID`), accepted parent (`parentID`), the original game-version selections (`versionSelection`), and each file's path, SHA-256 hash, submitted metadata, accepted ID, state and attempts. Receipt JSON is limited to 8 MiB. It contains no credentials; retain it unchanged as trusted local state.
+
+A supplied receipt path is still exposed after local preflight failures so the artifact step can preserve the existing file, unless the path contains the API token. Emitting that path does not establish that the receipt is valid.
+
+Publication reporting keeps schema version 1 unchanged. Upload states `pending`, `uploading`, `accepted` and `uncertain` describe upload progress only. Neither an accepted receipt entry nor its saved hold metadata verifies approval or current publication state.
 
 To resume, restore the identical upload files at the same paths, download the preserved receipt, and repeat the original file selections and metadata. The action checks paths, hashes, metadata, project, endpoint and parent identity before upload requests, reuses the accepted main and attachments, and uploads only missing files. Named game-version selections reuse the receipt's original catalog resolution without another catalog request. Local receipts cannot verify later changes or deletion on CurseForge.
 
@@ -133,7 +164,7 @@ jobs:
           path: saved-receipt
       - name: Resume missing uploads
         id: mod
-        uses: qb20nh/curseforge-upload@fix/multi-file-upload # Replace with the full approved, pushed commit SHA
+        uses: qb20nh/curseforge-upload@fix/publication-reporting # Replace with the full approved, pushed commit SHA
         with:
           receipt: saved-receipt/receipt.json
           file_path: build/libs/mod.jar
@@ -157,6 +188,8 @@ jobs:
 A file in `uploading` or `uncertain` state blocks resume until you reconcile it in the CurseForge dashboard. After confirming acceptance, edit only that entry's `state` to `accepted` and `id` to the positive numeric remote file ID. Only after confirming no remote file was created may you set `state` to `pending` and `id` to `null`. Keep paths, hashes, metadata and other entries unchanged; a reconciled main ID automatically fills its pending attachments' parent references. Reuse the accepted parent; do not upload another main file for recovery.
 
 Older action versions may have saved an HTTP 5xx upload as `pending`. Reconcile that file in the dashboard before resuming; updating the action cannot determine whether the earlier request created a file.
+
+A workflow record proving this action was skipped is different from an uncertain upload. A skipped action made no upload requests and emits no action outputs; an invocation that started and lost its result must use the dashboard reconciliation above. A consumer's separate recovery approval for skipped jobs does not reconcile uncertain uploader results.
 
 ## Development and validation
 

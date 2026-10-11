@@ -4,6 +4,7 @@ const { createHash } = require("node:crypto");
 const { requestJSON, uploadFile, redact } = require("./transport");
 const { prepareReceipt, readReceipt } = require("./receipts");
 const { EnvHttpProxyAgent } = require("undici");
+const { publicationStatus, renderSummary } = require("./reporting");
 
 const INPUTS = [
   "project_id",
@@ -270,7 +271,7 @@ function progressSummary(receipt, complete) {
   );
   const held = receipt.data.selectedParentID === null &&
     receipt.data.files[0].metadata.isMarkedForManualRelease === true;
-  return `${complete ? "Complete upload" : "Partial upload"}; parent ID: ${receipt.data.parentID || "not accepted"}; accepted: ${describe(accepted)}; pending: ${describe(pending)}; retry attempts: ${retries}; receipt: ${receipt.path}. ${held ? "The main file is held for manual release; after every required file is accepted and approved, release it from the dashboard." : "API acceptance does not confirm approval or public release."}`;
+  return `${complete ? "Complete upload" : "Partial upload"}; parent ID: ${receipt.data.parentID || "not accepted"}; accepted: ${describe(accepted)}; pending: ${describe(pending)}; retry attempts: ${retries}; receipt: ${receipt.path}. ${held ? "The main file is configured to be held for manual release; approval and public visibility are unverified. After every required file is accepted and approved, release the held files from the dashboard." : "API acceptance does not confirm approval or public release."}`;
 }
 
 async function upload(
@@ -279,11 +280,23 @@ async function upload(
     fetch: fetchOverride,
     catalogTimeoutMs = 30_000,
     uploadTimeoutMs = 600_000,
-    now, wait, onReceipt, onProgress, receiptDirectory,
+    now, wait, onReceipt, onProgress, onReport, receiptDirectory,
   } = {},
 ) {
+  // Preserve a supplied receipt even when local preflight fails, without
+  // trusting its contents or exposing a credential embedded in its path.
+  if (inputs.receipt && (!inputs.token || !inputs.receipt.includes(inputs.token)))
+    await onReceipt?.(path.resolve(inputs.receipt));
   const config = await validate(inputs);
-  let dispatcher, receipt;
+  let dispatcher, receipt, reconciliation;
+  let reportReceiptPath = inputs.receipt;
+  let reportData = {
+    selectedParentID: config.parentID,
+    files: config.files.map((file) => ({
+      path: file.path, metadata: file.metadata, id: null,
+      state: inputs.receipt ? "unknown" : "pending", attempts: 0,
+    })),
+  };
   const ensureDispatcher = () => {
     if (!dispatcher) {
       try {
@@ -301,7 +314,6 @@ async function upload(
     const headers = { "X-Api-Token": inputs.token };
     let candidate, versions;
     if (inputs.receipt) {
-      await onReceipt?.(path.resolve(inputs.receipt));
       candidate = await readReceipt(inputs.receipt);
       // Numeric selections can be checked locally; named selections reuse the
       // trusted receipt's original catalog resolution without a network request.
@@ -329,13 +341,14 @@ async function upload(
         versionSelection: config.entries.map((entry) => entry.entry),
         receipt: inputs.receipt, candidate, receiptDirectory,
       });
+      reportData = receipt.data;
       if (!inputs.receipt) await onReceipt?.(receipt.path);
     }
     const url = new URL(`/api/projects/${config.projectID}/upload-file`, config.base);
     let parentID = receipt?.data.parentID || config.parentID;
     let firstID;
     for (const [index, file] of config.files.entries()) {
-      const record = receipt?.data.files[index];
+      const record = reportData.files[index];
       if (record?.state === "accepted") {
         if (index === 0) firstID = record.id;
         continue;
@@ -358,7 +371,7 @@ async function upload(
               record.metadata = file.metadata;
               record.state = "uploading";
               record.attempts += 1;
-              await receipt.save();
+              await receipt?.save();
             }
             if (attempt > 1)
               await onProgress?.(
@@ -368,7 +381,7 @@ async function upload(
           onRetryableRejection: async () => {
             if (record) {
               record.state = "pending";
-              await receipt.save();
+              await receipt?.save();
             }
           },
         });
@@ -376,8 +389,9 @@ async function upload(
         if (record) {
           record.state = error.uncertain ? "uncertain" : "pending";
           try {
-            await receipt.save();
+            await receipt?.save();
           } catch {
+            reconciliation = { path: file.path, id: record.id };
             throw new Error(
               `${error.message} Receipt update failed; the saved in-flight state requires dashboard reconciliation.`,
             );
@@ -398,8 +412,9 @@ async function upload(
         record.id = id;
         record.state = "accepted";
         try {
-          await receipt.save();
+          await receipt?.save();
         } catch {
+          reconciliation = { path: file.path, id };
           throw new Error(
             `File ${path.basename(file.path)} was accepted as ID ${id}, but saving the receipt failed. Check the dashboard and reconcile the saved in-flight entry before retrying.`,
           );
@@ -409,21 +424,33 @@ async function upload(
     if (receipt) await onProgress?.(progressSummary(receipt, true));
     return String(firstID);
   } catch (error) {
+    // Only receipt data that passed identity validation may supply remote IDs.
+    if (error.receiptData) reportData = error.receiptData;
+    if (error.receiptPath) reportReceiptPath = error.receiptPath;
     if (!receipt && !inputs.receipt && error.receiptPath)
       await onReceipt?.(error.receiptPath);
     if (receipt) error.message += ` ${progressSummary(receipt, false)}`;
     throw error;
   } finally {
-    await dispatcher?.close();
+    try {
+      await dispatcher?.close();
+    } finally {
+      await onReport?.({
+        ...reportData,
+        receiptPath: receipt?.path || reportReceiptPath,
+        reconciliation,
+      });
+    }
   }
 }
 
 async function runAction(core, options = {}) {
   let token = "";
+  let inputs = {}, report;
   try {
     token = core.getInput("token");
     if (token) core.setSecret(token);
-    const inputs = { token };
+    inputs = { token };
     for (const name of INPUTS)
       inputs[name] = core.getInput(
         name,
@@ -440,10 +467,30 @@ async function runAction(core, options = {}) {
         core.info?.(redact(message, token));
         await options.onProgress?.(redact(message, token));
       },
+      onReport: (value) => { report = value; },
     });
     core.setOutput("id", id);
   } catch (error) {
+    if (report) report.failed = true;
     core.setFailed(redact(error.message, token));
+  } finally {
+    report ||= {
+      selectedParentID: null,
+      failed: true,
+      files: [inputs.file_path, ...(inputs.additional_files || "").split(/\r?\n/)]
+        .filter(Boolean).map((file) => ({
+          path: file, id: null, state: inputs.receipt ? "unknown" : "not attempted",
+        })),
+      receiptPath: inputs.receipt,
+    };
+    core.setOutput("publication_status", publicationStatus(report));
+    if (core.summary && process.env.GITHUB_STEP_SUMMARY) {
+      try {
+        await core.summary.addRaw(renderSummary(report, token)).write();
+      } catch {
+        core.warning?.("Could not write the CurseForge job summary; check the action logs and saved receipt.");
+      }
+    }
   }
 }
 

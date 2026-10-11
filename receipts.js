@@ -215,6 +215,7 @@ async function atomicSave(receiptPath, data) {
 
 async function prepareReceipt(config) {
   let receiptPath = config.receipt;
+  let validatedData;
   try {
     let data;
     let reconciled = false;
@@ -264,18 +265,21 @@ async function prepareReceipt(config) {
       }
     };
     await separateFromUploads(receiptPath, config.files);
+    validatedData = data;
     if (config.receipt) {
       const uploading = data.files.filter((file) => file.state === "uploading");
       for (const file of uploading) file.state = "uncertain";
       if (uploading.length || reconciled) await save();
-      if (data.files.some((file) => file.state === "uncertain"))
+      if (data.files.some((file) => file.state === "uncertain")) {
         throw new Error(
           "Receipt contains an uncertain upload. Check the CurseForge dashboard and manually reconcile its ID and state before resuming.",
         );
+      }
     } else await save();
     return { path: receiptPath, data, save };
   } catch (error) {
     if (receiptPath) error.receiptPath = receiptPath;
+    if (validatedData) error.receiptData = validatedData;
     throw error;
   }
 }

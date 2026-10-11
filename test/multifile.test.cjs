@@ -168,7 +168,7 @@ test("manual release auto preserves ordinary single-file publication behavior", 
   const core = actionCore({ ...input(f.file), manual_release: "auto" });
   await runAction(core, { fetch: s.fetch, receiptDirectory: f.dir });
   assert.equal(core.events.filter((event) => event[0] === "failed").length, 0);
-  assert.deepEqual(core.events.filter((event) => event[0] === "output"), [["output", "id", "987"]]);
+  assert.deepEqual(core.events.filter((event) => event[0] === "output"), [["output", "id", "987"], ["output", "publication_status", "unknown"]]);
   assert.equal(Object.hasOwn(parseUpload(s.uploads[0]).metadata, "isMarkedForManualRelease"), false);
 });
 
@@ -201,7 +201,7 @@ test("credential-bearing version labels fail preflight without requests or a rec
     receiptDirectory: f.dir,
   });
   assert.equal(calls, 0);
-  assert.deepEqual(core.events.filter((event) => event[0] === "output"), []);
+  assert.deepEqual(core.events.filter((event) => event[0] === "output"), [["output", "publication_status", "unknown"]]);
   const failures = core.events.filter((event) => event[0] === "failed");
   assert.equal(failures.length, 1);
   assert.equal(failures[0][1].includes(token), false);

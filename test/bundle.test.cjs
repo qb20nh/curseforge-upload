@@ -20,9 +20,33 @@ function outputs(text) {
   return values;
 }
 
+function assertSummary(summary, rows, publication) {
+  assert.match(summary, /CurseForge upload/);
+  assert.match(summary, new RegExp(`Publication status: ${publication}\\.`));
+  assert.match(summary, /Approval and public visibility are unverified/);
+  assert.doesNotMatch(summary, /Publication status: (?:public|pending_approval)\.|<td>(?:public|pending_approval)<\/td>/);
+  const actual = [...summary.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
+    .map((match) => [...match[1].matchAll(/<td>([\s\S]*?)<\/td>/g)].map((cell) => cell[1]))
+    .filter((cells) => cells.length);
+  assert.deepEqual(actual, rows);
+}
+
+function assertReceiptSchema(receipt) {
+  assert.equal(receipt.version, 1);
+  assert.deepEqual(Object.keys(receipt).sort(), [
+    "endpoint", "files", "parentID", "projectID", "selectedParentID", "version", "versionSelection",
+  ]);
+  for (const file of receipt.files)
+    assert.deepEqual(Object.keys(file).sort(), [
+      "attempts", "id", "metadata", "path", "sha256", "state",
+    ]);
+}
+
 async function run(t, values, base, outputEOL = "") {
   const f = await fixture(t, "github-output");
   await fs.writeFile(f.file, "");
+  const summaryPath = path.join(f.dir, "github-step-summary");
+  await fs.writeFile(summaryPath, "");
   const bundle = path.join(f.dir, "dist");
   await fs.cp(path.join(__dirname, "../dist"), bundle, { recursive: true });
   const env = { ...process.env };
@@ -34,6 +58,7 @@ async function run(t, values, base, outputEOL = "") {
       delete env[key];
   Object.assign(env, {
     GITHUB_OUTPUT: f.file,
+    GITHUB_STEP_SUMMARY: summaryPath,
     GITHUB_ACTIONS: "true",
     TEST_HTTP_BASE: base,
     TEST_OUTPUT_EOL: outputEOL,
@@ -62,7 +87,10 @@ async function run(t, values, base, outputEOL = "") {
   const parsed = outputs(output);
   if (parsed.receipt && !values.receipt)
     t.after(() => fs.rm(path.dirname(parsed.receipt), { recursive: true, force: true }));
-  return { code, stdout, stderr, output, outputs: parsed };
+  return {
+    code, stdout, stderr, output, outputs: parsed,
+    summary: await fs.readFile(summaryPath, "utf8"),
+  };
 }
 
 for (const outputEOL of ["", "\r\n"])
@@ -85,11 +113,17 @@ for (const outputEOL of ["", "\r\n"])
     assert.match(result.stdout, /::add-mask::bundled-secret/);
     const outputLines = result.output.split(/\r?\n/);
     assert.match(outputLines[0], /^id<<\S+$/);
-    assert.deepEqual(outputLines.slice(1), [
+    assert.deepEqual(outputLines.slice(1, 3), [
       "987",
       outputLines[0].slice("id<<".length),
+    ]);
+    assert.match(outputLines[3], /^publication_status<<\S+$/);
+    assert.deepEqual(outputLines.slice(4), [
+      "unknown",
+      outputLines[3].slice("publication_status<<".length),
       "",
     ]);
+    assert.deepEqual(result.outputs, { id: "987", publication_status: "unknown" });
     assert.equal(s.uploads.length, 1);
     const data = multipart(
       { headers: s.uploads[0].headers },
@@ -98,6 +132,9 @@ for (const outputEOL of ["", "\r\n"])
     assert.deepEqual(data.file, f.bytes);
     assert.equal(data.filename, "primary mod.jar");
     assert.equal(s.uploads[0].headers["x-api-token"], "bundled-secret");
+    assertSummary(result.summary, [[
+      "primary mod.jar", "987", "accepted", "unknown", "unknown",
+    ]], "unknown");
   });
 
 for (const manualRelease of [undefined, "auto", "true", "false"])
@@ -112,7 +149,10 @@ for (const manualRelease of [undefined, "auto", "true", "false"])
       ...(manualRelease === undefined ? {} : { manual_release: manualRelease }),
     }, s.base);
     assert.equal(result.code, 0, result.stderr + result.stdout);
-    assert.deepEqual(result.outputs, { id: "987" });
+    assert.deepEqual(result.outputs, {
+      id: "987", publication_status: manualRelease === "true" ? "held" : "unknown",
+    });
+    assert.deepEqual(Object.keys(result.outputs), ["id", "publication_status"]);
     const data = multipart({ headers: s.uploads[0].headers }, s.uploads[0].body);
     if (manualRelease === "true" || manualRelease === "false") {
       assert.equal(data.metadata.isMarkedForManualRelease, manualRelease === "true");
@@ -120,6 +160,10 @@ for (const manualRelease of [undefined, "auto", "true", "false"])
     } else {
       assert.equal(Object.hasOwn(data.metadata, "isMarkedForManualRelease"), false);
     }
+    assertSummary(result.summary, [[
+      "primary mod.jar", "987", "accepted", "unknown",
+      manualRelease === "true" ? "held (requested)" : "unknown",
+    ]], result.outputs.publication_status);
   });
 
 for (const unsafe of ["manual false", "duplicate", "missing attachment", "invalid manual value"])
@@ -142,8 +186,13 @@ for (const unsafe of ["manual false", "duplicate", "missing attachment", "invali
     }, s.base);
     assert.equal(result.code, 1, result.stderr);
     assert.equal(s.requests.length, 0);
-    assert.deepEqual(result.outputs, {});
+    assert.deepEqual(result.outputs, { publication_status: "unknown" });
     assert.equal((result.stdout.match(/::error::/g) || []).length, 1);
+    assertSummary(result.summary, [
+      ["primary mod.jar", "unknown", "not attempted", "unknown", "unknown"],
+      [unsafe === "duplicate" ? "primary mod.jar" : unsafe === "missing attachment" ? "absent.jar" : "sources.jar",
+        "unknown", "not attempted", "unknown", "unknown"],
+    ], "unknown");
   });
 
 for (const manualRelease of ["auto", "true"])
@@ -173,6 +222,10 @@ for (const manualRelease of ["auto", "true"])
     assert.equal(result.code, 0, result.stderr + result.stdout);
     assert.equal(result.outputs.id, "101");
     assert.ok(path.isAbsolute(result.outputs.receipt));
+    assert.deepEqual(result.outputs, {
+      receipt: result.outputs.receipt, id: "101", publication_status: "held",
+    });
+    assert.deepEqual(Object.keys(result.outputs), ["receipt", "id", "publication_status"]);
     assert.equal(s.uploads.length, 3);
     for (const [index, request] of s.uploads.entries()) {
       const data = multipart({ headers: request.headers }, request.body);
@@ -192,12 +245,51 @@ for (const manualRelease of ["auto", "true"])
     }
     const receiptText = await fs.readFile(result.outputs.receipt, "utf8");
     const receipt = JSON.parse(receiptText);
+    assertReceiptSchema(receipt);
     assert.equal(receipt.parentID, 101);
     assert.deepEqual(receipt.files.map((file) => file.id), [101, 102, 103]);
     assert.deepEqual(receipt.files.map((file) => file.state), ["accepted", "accepted", "accepted"]);
     assert.equal(receiptText.includes("bundled-secret"), false);
     assert.match(result.stdout, /Complete upload.*parent ID: 101/);
     assert.match(result.stdout, /held for manual release/);
+    assertSummary(result.summary, files.map((file, index) => [
+      path.basename(file.file), String(101 + index), "accepted", "unknown",
+      index === 0 || manualRelease === "true" ? "held (requested)" : "unknown",
+    ]), "held");
+    assert.match(result.summary, /Next action: Check every selected file&#39;s approval/);
+  });
+
+for (const manualRelease of ["auto", "true"])
+  test(`bundled existing-parent attachments report ${manualRelease === "true" ? "held" : "unknown"} publication`, async (t) => {
+    const files = [await fixture(t, "sources.jar"), await fixture(t, "evidence.zip")];
+    const s = await server(t, {
+      respond: (_req, res, _record, count) => {
+        res.writeHead(201);
+        res.end(JSON.stringify({ id: 100 + count }));
+      },
+    });
+    const result = await run(t, {
+      token: "bundled-secret",
+      project_id: "123",
+      game_endpoint: "minecraft",
+      file_path: files[0].file,
+      additional_files: files[1].file,
+      parent_file_id: "500",
+      manual_release: manualRelease,
+    }, s.base);
+    assert.equal(result.code, 0, result.stderr + result.stdout);
+    const publication = manualRelease === "true" ? "held" : "unknown";
+    assert.deepEqual(result.outputs, {
+      receipt: result.outputs.receipt, id: "101", publication_status: publication,
+    });
+    assert.deepEqual(Object.keys(result.outputs), ["receipt", "id", "publication_status"]);
+    assert.equal(s.uploads.length, 2);
+    assertSummary(result.summary, files.map((file, index) => [
+      path.basename(file.file), String(101 + index), "accepted", "unknown",
+      manualRelease === "true" ? "held (requested)" : "unknown",
+    ]), publication);
+    assert.match(result.summary, /Existing parent ID: 500\. Its visibility is unverified/);
+    assert.match(result.summary, /adding attachments cannot guarantee that the parent stays private/);
   });
 
 test("bundled partial failure exposes receipt without id and resume uploads only the missing attachment", async (t) => {
@@ -222,7 +314,10 @@ test("bundled partial failure exposes receipt without id and resume uploads only
   };
   const partial = await run(t, values, s.base);
   assert.equal(partial.code, 1, partial.stderr);
-  assert.deepEqual(Object.keys(partial.outputs), ["receipt"]);
+  assert.deepEqual(partial.outputs, {
+    receipt: partial.outputs.receipt, publication_status: "unknown",
+  });
+  assert.deepEqual(Object.keys(partial.outputs), ["receipt", "publication_status"]);
   assert.equal(s.uploads.length, 3);
   const saved = JSON.parse(await fs.readFile(partial.outputs.receipt, "utf8"));
   assert.equal(saved.parentID, 101);
@@ -231,12 +326,19 @@ test("bundled partial failure exposes receipt without id and resume uploads only
   assert.equal(saved.files[0].metadata.isMarkedForManualRelease, true);
   assert.match(partial.stdout, /Partial upload.*parent ID: 101/);
   assert.doesNotMatch(partial.stdout, /Complete upload/);
+  assertSummary(partial.summary, [
+    ["main.jar", "101", "accepted", "unknown", "held (requested)"],
+    ["sources.jar", "102", "accepted", "unknown", "unknown"],
+    ["evidence with spaces.zip", "unknown", "pending", "unknown", "unknown"],
+  ], "unknown");
   const errors = partial.stdout.split("\n").filter((line) => line.startsWith("::error::"));
   assert.equal(errors.length, 1);
   assert.equal(errors[0].includes("bundled-secret"), false);
   const resumed = await run(t, { ...values, receipt: partial.outputs.receipt }, s.base);
   assert.equal(resumed.code, 0, resumed.stderr + resumed.stdout);
-  assert.deepEqual(resumed.outputs, { receipt: partial.outputs.receipt, id: "101" });
+  assert.deepEqual(resumed.outputs, {
+    receipt: partial.outputs.receipt, id: "101", publication_status: "held",
+  });
   assert.equal(s.uploads.length, 4);
   const missing = multipart({ headers: s.uploads[3].headers }, s.uploads[3].body);
   assert.equal(missing.filename, "evidence with spaces.zip");
@@ -246,6 +348,11 @@ test("bundled partial failure exposes receipt without id and resume uploads only
   assert.deepEqual(completed.files.map((file) => file.id), [101, 102, 104]);
   assert.deepEqual(completed.files.map((file) => file.state), ["accepted", "accepted", "accepted"]);
   assert.match(resumed.stdout, /Complete upload/);
+  assertSummary(resumed.summary, [
+    ["main.jar", "101", "accepted", "unknown", "held (requested)"],
+    ["sources.jar", "102", "accepted", "unknown", "unknown"],
+    ["evidence with spaces.zip", "104", "accepted", "unknown", "unknown"],
+  ], "held");
 });
 
 test("bundled stored attachment with HTTP 500 remains uncertain and resume sends no upload", async (t) => {
@@ -276,7 +383,9 @@ test("bundled stored attachment with HTTP 500 remains uncertain and resume sends
   };
   const failed = await run(t, values, s.base);
   assert.equal(failed.code, 1, failed.stderr);
-  assert.deepEqual(Object.keys(failed.outputs), ["receipt"]);
+  assert.deepEqual(failed.outputs, {
+    receipt: failed.outputs.receipt, publication_status: "unknown",
+  });
   assert.equal(s.uploads.length, 2);
   assert.deepEqual(await fs.readFile(storedPaths[1]), child.bytes);
   const receipt = JSON.parse(await fs.readFile(failed.outputs.receipt, "utf8"));
@@ -285,12 +394,22 @@ test("bundled stored attachment with HTTP 500 remains uncertain and resume sends
   assert.equal(s.uploads.length, 2, "resume must not duplicate an attachment stored before HTTP 500");
   assert.equal(storedPaths.length, 2);
   assert.equal(resumed.code, 1, resumed.stderr + resumed.stdout);
-  assert.deepEqual(resumed.outputs, { receipt: failed.outputs.receipt });
+  assert.deepEqual(resumed.outputs, {
+    receipt: failed.outputs.receipt, publication_status: "unknown",
+  });
   assert.equal(receipt.parentID, 101);
   assert.deepEqual(receipt.files.map((file) => file.state), ["accepted", "uncertain"]);
   assert.deepEqual(receipt.files.map((file) => file.id), [101, null]);
   assert.deepEqual(receipt.files.map((file) => file.attempts), [1, 1]);
   assert.equal(receipt.files[0].metadata.isMarkedForManualRelease, true);
+  assertReceiptSchema(receipt);
+  assert.deepEqual(JSON.parse(await fs.readFile(resumed.outputs.receipt, "utf8")), receipt);
+  for (const result of [failed, resumed])
+    assertSummary(result.summary, [
+      ["main.jar", "101", "accepted", "unknown", "held (requested)"],
+      ["sources with spaces.jar", "unknown", "uncertain", "unknown", "unknown"],
+    ], "unknown");
+  assert.match(resumed.summary, /Reconcile sources with spaces.jar in the CurseForge dashboard before resuming/);
   assert.match(failed.stdout, /uncertain.*check.*before retry/i);
   assert.match(resumed.stdout, /uncertain upload.*manually reconcile/i);
   assert.doesNotMatch(resumed.stdout, /Complete upload/);
@@ -306,7 +425,7 @@ for (const failure of [
   "redirect",
   "connection",
 ])
-  test(`bundled action fails once without output: ${failure}`, async (t) => {
+  test(`bundled action fails once without successful id: ${failure}`, async (t) => {
     const f = await fixture(t);
     const s = await server(t, {
       respond: (req, res) => {
@@ -333,7 +452,7 @@ for (const failure of [
       s.base,
     );
     assert.equal(result.code, 1, result.stderr);
-    assert.equal(result.output, "");
+    assert.deepEqual(result.outputs, { publication_status: "unknown" });
     assert.equal(s.uploads.length, failure === "invalid input" ? 0 : 1);
     assert.equal((result.stdout.match(/::error::/g) || []).length, 1);
     const errors = result.stdout
@@ -342,4 +461,9 @@ for (const failure of [
       .join("\n");
     assert.equal(errors.includes("bundled-secret"), false);
     assert.equal(result.stderr, "");
+    const state = failure === "invalid input" ? "not attempted"
+      : failure === "authorization" ? "pending" : "uncertain";
+    assertSummary(result.summary, [[
+      "primary mod.jar", "unknown", state, "unknown", "unknown",
+    ]], "unknown");
   });

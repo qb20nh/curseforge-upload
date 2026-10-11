@@ -39,7 +39,7 @@ inputs:
     description: 'The type of this release. Allowed values: "alpha", "beta", "release".'
     required: false
   manual_release:
-    description: "auto preserves ordinary single-file publication and holds a new main file with attachments for dashboard release. true holds the file; false is rejected for a new main file with attachments."
+    description: "auto preserves ordinary single-file publication and requests a hold for a new main file with attachments. true requests a hold for every selected file; false is rejected for a new main file with attachments. Dashboard release remains manual."
     required: false
     default: "auto"
   relations:
@@ -49,7 +49,9 @@ outputs:
   id:
     description: "Accepted ID of file_path, emitted only when every selected file was accepted."
   receipt:
-    description: "Upload receipt path for multi-file or receipt-based runs, including failed runs. Preserve it with an if: always() artifact step."
+    description: "Upload receipt path for multi-file or receipt-based runs, including failed runs. A supplied path survives preflight failures unless it contains the token. Preserve it with an if: always() artifact step."
+  publication_status:
+    description: "held only after action success when all uploads are accepted and current or saved original metadata requests a hold for the new main or every selected existing-parent attachment; otherwise unknown, including failures. held reports requested policy, not observed visibility. pending_approval and public require verified server status and are never emitted by the current API integration."
 runs:
   using: "node24"
   main: "dist/index.js"

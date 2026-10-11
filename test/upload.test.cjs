@@ -202,7 +202,7 @@ for (const [key, value] of [
       },
     });
     assert.equal(calls, 0);
-    assert.equal(core.events.filter((e) => e[0] === "output").length, 0);
+    assert.deepEqual(core.events.filter((e) => e[0] === "output"), [["output", "publication_status", "unknown"]]);
     assert.equal(core.events.filter((e) => e[0] === "failed").length, 1);
   });
 
@@ -290,7 +290,7 @@ test("mask token before reading remaining inputs; output a string", async (t) =>
   ]);
   assert.deepEqual(
     core.events.filter((e) => e[0] === "output"),
-    [["output", "id", "987"]],
+    [["output", "id", "987"], ["output", "publication_status", "unknown"]],
   );
 });
 
@@ -337,17 +337,14 @@ for (const [status, body, uncertain] of [
       assert.match(failures[0][1], /upload/i);
       if (status !== 302)
         assert.match(failures[0][1], new RegExp(String(status)));
-      assert.equal(
-        core.events.some((e) => e[0] === "output"),
-        false,
-      );
+      assert.deepEqual(core.events.filter((e) => e[0] === "output"), [["output", "publication_status", "unknown"]]);
       if (uncertain)
         assert.match(failures[0][1], /uncertain.*check.*before retry/i);
     }
   });
 
 for (const failure of ["connection", "deadline", "body deadline"])
-  test(`one POST and no output after ${failure}`, async (t) => {
+  test(`one POST and no successful id after ${failure}`, async (t) => {
     const f = await fixture(t);
     const s = await server(t, {
       respond: (req, res) => {
@@ -361,10 +358,7 @@ for (const failure of ["connection", "deadline", "body deadline"])
     const core = actionCore(input(f.file));
     await runAction(core, { fetch: s.fetch, uploadTimeoutMs: 100 });
     assert.equal(s.uploads.length, 1);
-    assert.equal(
-      core.events.some((e) => e[0] === "output"),
-      false,
-    );
+    assert.deepEqual(core.events.filter((e) => e[0] === "output"), [["output", "publication_status", "unknown"]]);
     assert.match(
       core.events.find((e) => e[0] === "failed")[1],
       /uncertain.*check.*before retry/i,
@@ -414,10 +408,7 @@ for (const kind of [
     await runAction(core, { fetch: s.fetch, catalogTimeoutMs: 100 });
     assert.equal(s.uploads.length, 0);
     assert.equal(core.events.filter((e) => e[0] === "failed").length, 1);
-    assert.equal(
-      core.events.some((e) => e[0] === "output"),
-      false,
-    );
+    assert.deepEqual(core.events.filter((e) => e[0] === "output"), [["output", "publication_status", "unknown"]]);
   });
 
 test("namespaced version ambiguity stops before upload", async (t) => {

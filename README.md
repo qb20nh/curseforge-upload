@@ -98,7 +98,7 @@ An attachment retries only after a complete HTTP 400 JSON response with numeric 
 
 On complete success, `steps.<step-id>.outputs.id` is the accepted ID of `file_path` as a string. It is emitted only after every selected file has an accepted ID. Failure emits no successful `id`. Multi-file reports distinguish partial and complete uploads and include the parent ID, accepted/pending files, attempt counts and receipt path. API acceptance does not mean moderation is complete or the release is public.
 
-Failures report the operation and HTTP status when received. Displayed response text is capped at 4 KiB and the token is redacted. Timeouts, connection failures, unreadable or truncated error responses, and invalid success responses can leave an **uncertain** result: the server may already have accepted the upload. Check the project's files before retrying.
+Failures report the operation and HTTP status when received. Displayed response text is capped at 4 KiB and the token is redacted. HTTP 5xx server errors, timeouts, connection failures, unreadable or truncated error responses, and invalid success responses leave an **uncertain** upload result: the server may already have accepted the upload. A complete server-error response does not establish that no file was created. Check the project's files before retrying.
 
 ## Receipts and resume
 
@@ -155,6 +155,8 @@ jobs:
 ```
 
 A file in `uploading` or `uncertain` state blocks resume until you reconcile it in the CurseForge dashboard. After confirming acceptance, edit only that entry's `state` to `accepted` and `id` to the positive numeric remote file ID. Only after confirming no remote file was created may you set `state` to `pending` and `id` to `null`. Keep paths, hashes, metadata and other entries unchanged; a reconciled main ID automatically fills its pending attachments' parent references. Reuse the accepted parent; do not upload another main file for recovery.
+
+Older action versions may have saved an HTTP 5xx upload as `pending`. Reconcile that file in the dashboard before resuming; updating the action cannot determine whether the earlier request created a file.
 
 ## Development and validation
 
